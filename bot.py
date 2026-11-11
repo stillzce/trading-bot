@@ -688,6 +688,55 @@ def run_example(src, symbol, per_tf=1, after=15):
         send_photo(png, caption)
 
 
+def run_stats(src):
+    """Скільки сьогодні було сигналів WT на екстремумах: за контекстом і проти, по кожному інструменту й ТФ."""
+    cache = BarCache(src)
+    start = pd.Timestamp(datetime.now(LOCAL_TZ).replace(hour=0, minute=0, second=0, microsecond=0)).tz_convert("UTC")
+    now = datetime.now(LOCAL_TZ)
+    lines = [f"📊 <b>Сигнали WT за сьогодні</b> (з 00:00 до {now:%H:%M})",
+             f"рівні ±{WT_OB:.0f} · ✅ за контекстом / ❌ проти"]
+    tot_with = tot_against = 0
+    for sym in SYMBOLS:
+        try:
+            c = context(cache, sym)
+        except Exception as e:
+            lines.append(f"\n⚠️ <b>{sym}</b>: {e}")
+            continue
+        parts, s_with, s_against = [], 0, 0
+        for tf in SIGNAL_TFS:
+            if tf == "1D":
+                continue
+            try:
+                df = cache.get(sym, tf)
+            except Exception as e:
+                print(f"{sym} {tf}: {e}")
+                continue
+            if len(df) < 60:
+                continue
+            wt1, wt2 = wavetrend(df)
+            w = a = 0
+            for i in range(1, len(df)):
+                if df.index[i] < start:
+                    continue
+                side = wt_extreme_cross(wt1, wt2, i)
+                if not side:
+                    continue
+                if (side == "LONG" and c["bias"] == "BULL") or (side == "SHORT" and c["bias"] == "BEAR"):
+                    w += 1
+                else:
+                    a += 1
+            s_with += w
+            s_against += a
+            if w or a:
+                parts.append(f"{TF_LABEL[tf]} {w}/{a}")
+        tot_with += s_with
+        tot_against += s_against
+        lines.append(f"\n{BIAS_ICON[c['bias']]} <b>{sym}</b> ({c['bias']}): ✅ {s_with} · ❌ {s_against}"
+                     + (f"\n   {' · '.join(parts)}" if parts else "\n   сигналів не було"))
+    lines.append(f"\n<b>Разом:</b> ✅ {tot_with} · ❌ {tot_against}")
+    send_text("\n".join(lines))
+
+
 def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else "loop"
     mode, _, arg = mode.partition(":")
@@ -699,6 +748,8 @@ def main():
         send_text(f"📋 <b>Інструменти</b> · джерело: {getattr(src, 'note', '')}\n" + ", ".join(src.names()))
     elif mode == "morning":
         send_morning(*build_contexts(BarCache(src)), getattr(src, "note", ""))
+    elif mode == "stats":
+        run_stats(src)
     elif mode == "example":
         run_example(src, (arg or "GBPUSD").upper())
     elif mode == "once":
