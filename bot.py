@@ -55,6 +55,7 @@ WT_N1 = int(env("WT_CHANNEL", "10"))
 WT_N2 = int(env("WT_AVERAGE", "21"))
 WT_OB = float(env("WT_OB", "60"))
 WT_OS = float(env("WT_OS", "-60"))
+WT_SIGNAL = env("WT_SIGNAL", "exit")  # exit — вихід лінії WT із зони (як у скрипті); cross — перетин WT1/WT2 у зоні
 LOCAL_TZ = ZoneInfo(env("LOCAL_TZ", "Europe/Kyiv"))
 WORK_START = env("WORK_START", "08:00")
 WORK_END = env("WORK_END", "23:00")
@@ -310,7 +311,7 @@ class OkxSource:
         inst, bar = self.ids[symbol.upper()], self.BAR[resolution]
         frm_ms = int(frm.timestamp() * 1000)
         rows, after = [], None
-        for _ in range(150):  # пагінація назад у часі по 100 свічок
+        for _ in range(400):  # пагінація назад у часі по 100 свічок
             params = {"instId": inst, "bar": bar, "limit": 100}
             if after:
                 params["after"] = after
@@ -546,15 +547,36 @@ def context(cache, sym):
 
 
 def wt_extreme_cross(wt1, wt2, i):
-    """LONG = перетин вгору на дні (≤ OS), SHORT = перетин вниз на вершині (≥ OB)."""
+    """Сигнал WaveTrend.
+    WT_SIGNAL=exit (за замовчуванням, як у скрипті Богдана «WaveTrend BK»):
+        LONG  — лінія WT виходить з дна: перетинає −60 знизу вгору (ta.crossover(tci, limitos));
+        SHORT — лінія WT виходить з вершини: перетинає +60 згори вниз (ta.crossunder(tci, limitob)).
+    WT_SIGNAL=cross: перетин WT1/WT2 всередині зони (старий варіант)."""
     a1, a2, b1, b2 = wt1.iloc[i - 1], wt2.iloc[i - 1], wt1.iloc[i], wt2.iloc[i]
-    if np.isnan([a1, a2, b1, b2]).any():
+    if WT_SIGNAL == "cross":
+        if np.isnan([a1, a2, b1, b2]).any():
+            return None
+        if a1 <= a2 and b1 > b2 and b2 <= WT_OS:
+            return "LONG"
+        if a1 >= a2 and b1 < b2 and b2 >= WT_OB:
+            return "SHORT"
         return None
-    if a1 <= a2 and b1 > b2 and b2 <= WT_OS:
+    if np.isnan([a1, b1]).any():
+        return None
+    if a1 <= WT_OS < b1:
         return "LONG"
-    if a1 >= a2 and b1 < b2 and b2 >= WT_OB:
+    if a1 >= WT_OB > b1:
         return "SHORT"
     return None
+
+
+def zone_extreme(df, wt1, i, side, max_back=200):
+    """Дно/вершина: мінімум (максимум) свічок, поки WT був у зоні перед сигналом, + свічка сигналу."""
+    j = i - 1
+    while j > 0 and i - j < max_back and ((wt1.iloc[j] <= WT_OS) if side == "LONG" else (wt1.iloc[j] >= WT_OB)):
+        j -= 1
+    seg = df.iloc[j + 1: i + 1]
+    return float(seg["low"].min()) if side == "LONG" else float(seg["high"].max())
 
 
 # ============================================================================ форматування і графік
@@ -763,13 +785,15 @@ def check_cycle(cache, ctx, state, first=False):
         hits.sort(key=lambda h: TF_MIN[h[0]])
         tf_top, _, df_top, _, _, i_top = hits[-1]
         icon = "🟢" if side == "LONG" else "🔴"
-        where = "дно" if side == "LONG" else "вершина"
+        where = f"вийшов з дна (перетнув {WT_OS:.0f} вгору)" if side == "LONG" else f"вийшов з вершини (перетнув {WT_OB:.0f} вниз)"
         tfs = ", ".join(TF_LABEL[h[0]] for h in hits)
-        wts = "\n".join(f"   {TF_LABEL[h[0]]}: {h[3].iloc[h[5]]:.0f} / {h[4].iloc[h[5]]:.0f}" for h in hits)
+        ext_name = "дно" if side == "LONG" else "вершина"
+        wts = "\n".join(f"   {TF_LABEL[h[0]]}: WT {h[3].iloc[h[5]]:.0f} · {ext_name} {fmt(zone_extreme(h[2], h[3], h[5], side))}"
+                        for h in hits)
         price = df_top["close"].iloc[i_top]
         caption = (
             f"{icon} <b>{side} · {sym} · {tfs}</b>\n"
-            f"WT {where}, перетин {'вгору' if side == 'LONG' else 'вниз'}:\n{wts}\n"
+            f"WT {where}:\n{wts}\n"
             f"Контекст дня: {BIAS_ICON[c['bias']]} {c['bias']} — {c['note']}\n"
             f"Ціна: {fmt(price)} · {datetime.now(LOCAL_TZ):%H:%M}"
             + (f"\nДані: {c['src']}" if c.get("src") else "")
@@ -852,8 +876,8 @@ def run_example(src, symbol, per_tf=1, after=15):
         icon = "🟢" if side == "LONG" else "🔴"
         caption = (
             f"🧪 ПРИКЛАД · {icon} <b>{side} · {symbol} · {TF_LABEL[tf]}</b>\n"
-            f"WT {'дно' if side == 'LONG' else 'вершина'}, перетин {'вгору' if side == 'LONG' else 'вниз'}: "
-            f"{wt1.iloc[i]:.0f} / {wt2.iloc[i]:.0f}\n"
+            f"WT {'вийшов з дна' if side == 'LONG' else 'вийшов з вершини'}: {wt1.iloc[i]:.0f} · "
+            f"{'дно' if side == 'LONG' else 'вершина'} {fmt(zone_extreme(df, wt1, i, side))}\n"
             f"Контекст дня: {BIAS_ICON[c['bias']]} {c['bias']} — {c['note']}\n"
             f"Ціна: {fmt(df['close'].iloc[i])} · свічка закрилась {when.tz_convert(LOCAL_TZ):%H:%M}"
         )
@@ -933,6 +957,8 @@ def main():
     elif mode == "morning":
         send_morning(*build_contexts(BarCache(src)), getattr(src, "note", ""))
     elif mode == "backtest":
+        if arg:
+            os.environ["BT_DAYS"] = arg
         import backtest
         backtest.run(src)
     elif mode == "stats":

@@ -3,9 +3,11 @@
 
 Правила (механічні, щоб можна було порахувати):
   • контекст дня — як у боті (свічка до 17:00 NY проти попередньої; нейтральний день → контекст з минулого);
-  • вхід — закриття свічки, на якій WT перетнувся на ≤ WT_OS (лонг у BULL) або ≥ WT_OB (шорт у BEAR);
-  • стоп — за мінімумом/максимумом останніх SWING_N свічок (включно зі свічкою сигналу);
-  • виходи (рахуються паралельно): тейк 1R / 2R / 3R, ціль PDH/PDL, «тримати до кінця дня»;
+  • вхід — закриття свічки, на якій лінія WT вийшла з дна (перетнула −60 вгору; лонг у BULL)
+    або з вершини (перетнула +60 вниз; шорт у BEAR) — як у скрипті «WaveTrend BK»;
+  • стоп — за дном/вершиною: мінімум (максимум) свічок, поки WT був у зоні, + свічка сигналу;
+  • виходи (рахуються паралельно): тейк 1R / 2R / 3R, ціль PDH/PDL, «тримати до кінця дня»,
+    а також PD і «до кінця дня» з беззбитком після +1R;
   • усе, що не закрилось, закривається по ринку в кінці торгового дня (17:00 NY);
   • якщо в одній свічці зачеплено і стоп, і тейк — вважаємо, що спершу стоп (песимістично);
   • спред/комісії не враховуються. Угоди на різних ТФ рахуються окремо (можуть перетинатися в часі).
@@ -18,10 +20,9 @@ import pandas as pd
 
 import bot
 
-SWING_N = int(os.environ.get("BT_SWING_N", "5"))
 DAYS = int(os.environ.get("BT_DAYS", "30"))
 TFS = [t for t in os.environ.get("BT_TFS", "5m,15m,30m,1H,4H").split(",") if t]
-VARIANTS = ["1R", "2R", "3R", "PD", "EOD"]
+VARIANTS = ["1R", "2R", "3R", "PD", "PD_BE", "EOD", "EOD_BE"]
 
 
 def session_table(h1):
@@ -44,37 +45,41 @@ def session_table(h1):
     return rows
 
 
-def simulate(df, i, side, end, pdh, pdl):
+def simulate(df, i, side, end, pdh, pdl, wt1):
     """Повертає R для кожного варіанту виходу (або None, якщо стоп некоректний)."""
     entry = df["close"].iloc[i]
-    lo = df["low"].iloc[max(0, i - SWING_N + 1): i + 1].min()
-    hi = df["high"].iloc[max(0, i - SWING_N + 1): i + 1].max()
-    risk = entry - lo if side == "LONG" else hi - entry
+    ext = bot.zone_extreme(df, wt1, i, side)
+    risk = entry - ext if side == "LONG" else ext - entry
     if not risk or risk <= 0:
         return None
     sgn = 1 if side == "LONG" else -1
     stop = entry - sgn * risk
     pd_lvl = pdh if side == "LONG" else pdl
     pd_r = (pd_lvl - entry) * sgn / risk
-    targets = {"1R": 1.0, "2R": 2.0, "3R": 3.0, "PD": pd_r if pd_r > 0.3 else None, "EOD": None}
+    pd_ok = pd_r > 0.3
+    targets = {"1R": 1.0, "2R": 2.0, "3R": 3.0, "PD": pd_r if pd_ok else None, "PD_BE": pd_r if pd_ok else None,
+               "EOD": None, "EOD_BE": None}
     res = {}
     future = df.iloc[i + 1:]
     future = future[future.index < end]
     for name, tgt_r in targets.items():
-        if name == "PD" and tgt_r is None:
+        if name.startswith("PD") and tgt_r is None:
             res[name] = None  # ціль уже позаду або надто близько — угоди в цьому варіанті немає
             continue
         out = None
+        cur_stop, be = stop, name.endswith("_BE")
         for _, bar in future.iterrows():
-            hit_stop = bar.low <= stop if side == "LONG" else bar.high >= stop
+            hit_stop = bar.low <= cur_stop if side == "LONG" else bar.high >= cur_stop
             hit_tgt = tgt_r is not None and ((bar.high >= entry + tgt_r * risk) if side == "LONG"
                                              else (bar.low <= entry - tgt_r * risk))
             if hit_stop:
-                out = -1.0
+                out = (cur_stop - entry) * sgn / risk
                 break
             if hit_tgt:
                 out = tgt_r
                 break
+            if be and ((bar.high >= entry + risk) if side == "LONG" else (bar.low <= entry - risk)):
+                cur_stop = entry  # беззбиток після +1R (з наступної свічки)
         if out is None:  # закриття в кінці дня
             last = future["close"].iloc[-1] if len(future) else entry
             out = (last - entry) * sgn / risk
@@ -129,12 +134,12 @@ def run(src):
                     side = bot.wt_extreme_cross(wt1, wt2, i)
                     if not side or (side == "LONG") != (s["bias"] == "BULL"):
                         continue
-                    r = simulate(df, i, side, s["end"], s["pdh"], s["pdl"])
+                    r = simulate(df, i, side, s["end"], s["pdh"], s["pdl"], wt1)
                     if r:
                         trades.append(dict(sym=sym, tf=tf, side=side, t=str(df.index[i] + dur), **r))
             print(f"{sym} {tf}: свічок {len(df)}, угод поки {sum(1 for t in trades if t['sym'] == sym and t['tf'] == tf)}")
     trades.sort(key=lambda t: t["t"])
-    report = {"period_days": DAYS, "swing_n": SWING_N, "total_trades": len(trades), "by_tf": {}, "by_sym": {},
+    report = {"period_days": DAYS, "signal": bot.WT_SIGNAL, "total_trades": len(trades), "by_tf": {}, "by_sym": {},
               "all": {v: stats([t[v] for t in trades]) for v in VARIANTS}}
     for tf in TFS:
         tt = [t for t in trades if t["tf"] == tf]
