@@ -106,9 +106,16 @@ def parse_bars(j):
 class TradeLocker:
     def __init__(self):
         kind = env("TL_ENV", "demo").lower()
-        self.base = f"https://{'live' if kind == 'live' else 'demo'}.tradelocker.com/backend-api"
+        first = "live" if kind == "live" else "demo"
         self.s = requests.Session()
-        self._login()
+        # деякі брокери тримають демо-рахунки на live.tradelocker.com — пробуємо обидва середовища
+        for e in (first, "demo" if first == "live" else "live"):
+            self.base = f"https://{e}.tradelocker.com/backend-api"
+            if self._login(fatal=False):
+                print(f"TradeLocker: вхід через {e}.tradelocker.com")
+                break
+        else:
+            sys.exit("TradeLocker: не вдалось увійти ні в demo, ні в live — перевір TL_EMAIL, TL_PASSWORD, TL_SERVER")
         accounts = self._get("/auth/jwt/all-accounts")["accounts"]
         want = env("TL_ACC_NUM")
         acc = next((a for a in accounts if want and str(a.get("accNum")) == want), accounts[0])
@@ -117,15 +124,20 @@ class TradeLocker:
         self._instruments = None
         self._ids = {}
 
-    def _login(self):
+    def _login(self, fatal=True):
         r = requests.post(
             self.base + "/auth/jwt/token",
             json={"email": need("TL_EMAIL"), "password": need("TL_PASSWORD"), "server": need("TL_SERVER")},
             timeout=30,
         )
-        if not r.ok:
-            sys.exit(f"TradeLocker: не вдалось увійти ({r.status_code}): {r.text[:300]}")
+        if not r.ok or "accessToken" not in r.text:
+            msg = f"TradeLocker {self.base}: не вдалось увійти ({r.status_code}): {r.text[:300]}"
+            if fatal:
+                sys.exit(msg)
+            print(msg)
+            return False
         self.s.headers["Authorization"] = f"Bearer {r.json()['accessToken']}"
+        return True
 
     def _get(self, path, **params):
         for attempt in range(4):
