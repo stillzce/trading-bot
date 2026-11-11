@@ -49,7 +49,7 @@ jobs:
       - name: Запуск
         env:
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
-          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID || '280593865' }}
           TL_ENV: ${{ secrets.TL_ENV }}
           TL_EMAIL: ${{ secrets.TL_EMAIL }}
           TL_PASSWORD: ${{ secrets.TL_PASSWORD }}
