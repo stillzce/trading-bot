@@ -115,7 +115,7 @@ class TradeLocker:
                 print(f"TradeLocker: вхід через {e}.tradelocker.com")
                 break
         else:
-            sys.exit("TradeLocker: не вдалось увійти ні в demo, ні в live — перевір TL_EMAIL, TL_PASSWORD, TL_SERVER")
+            raise RuntimeError("TradeLocker: не вдалось увійти ні в demo, ні в live — перевір TL_EMAIL, TL_PASSWORD, TL_SERVER")
         accounts = self._get("/auth/jwt/all-accounts")["accounts"]
         want = env("TL_ACC_NUM")
         acc = next((a for a in accounts if want and str(a.get("accNum")) == want), accounts[0])
@@ -133,7 +133,7 @@ class TradeLocker:
         if not r.ok or "accessToken" not in r.text:
             msg = f"TradeLocker {self.base}: не вдалось увійти ({r.status_code}): {r.text[:300]}"
             if fatal:
-                sys.exit(msg)
+                raise RuntimeError(msg)
             print(msg)
             return False
         self.s.headers["Authorization"] = f"Bearer {r.json()['accessToken']}"
@@ -214,8 +214,67 @@ class MockSource:
         return df
 
 
+class YahooSource:
+    """Запасне джерело: Yahoo Finance (ф'ючерси/індекси/форекс), без акаунтів. Ф'ючерси CME там із затримкою ~10 хв."""
+
+    note = "Yahoo (запасне джерело)"
+    TICKERS = {"US500": "ES=F", "SPX500": "ES=F", "NAS100": "NQ=F", "NDX100": "NQ=F", "GER40": "^GDAXI",
+               "DE40": "^GDAXI", "EURUSD": "EURUSD=X", "GBPUSD": "GBPUSD=X", "XAUUSD": "GC=F", "US30": "YM=F"}
+    INTERVAL = {"1m": "1m", "5m": "5m", "15m": "15m", "30m": "30m", "1H": "60m", "4H": "60m"}
+    MAX_DAYS = {"1m": 6.5, "5m": 58, "15m": 58, "30m": 58, "1H": 720, "4H": 720}
+
+    def __init__(self):
+        import yfinance  # noqa: F401  (перевірка, що встановлено)
+
+    def ticker(self, symbol):
+        s = symbol.upper().split(".")[0]
+        return self.TICKERS.get(s, symbol)
+
+    def names(self):
+        return [f"{s} → {self.ticker(s)}" for s in SYMBOLS]
+
+    def bars(self, symbol, resolution, frm, to=None):
+        import yfinance as yf
+        now = pd.Timestamp.now(tz="UTC")
+        to = to or now
+        frm = max(frm, now - pd.Timedelta(days=self.MAX_DAYS[resolution]))
+        for attempt in range(3):
+            try:
+                raw = yf.Ticker(self.ticker(symbol)).history(
+                    start=frm.to_pydatetime(), end=(to + pd.Timedelta(minutes=5)).to_pydatetime(),
+                    interval=self.INTERVAL[resolution], prepost=True, auto_adjust=False)
+                break
+            except Exception as e:
+                print(f"Yahoo {symbol} {resolution}: {e}")
+                time.sleep(3 + attempt * 5)
+        else:
+            raise RuntimeError(f"Yahoo не віддав дані для {symbol}")
+        if raw is None or raw.empty:
+            return EMPTY.copy()
+        df = raw[["Open", "High", "Low", "Close"]].astype(float)
+        df.columns = ["open", "high", "low", "close"]
+        df.index = pd.DatetimeIndex(df.index).tz_convert("UTC")
+        df = df[~df.index.duplicated(keep="last")].dropna()
+        if resolution == "4H":
+            g = df.resample("4h", origin="epoch")
+            df = pd.DataFrame({"open": g["open"].first(), "high": g["high"].max(),
+                               "low": g["low"].min(), "close": g["close"].last()}).dropna()
+        return df
+
+
 def make_source():
-    return MockSource() if env("DATA_SOURCE") == "mock" else TradeLocker()
+    """TradeLocker, а якщо не пускає — Yahoo. Коли пароль запрацює, бот сам повернеться на TradeLocker."""
+    if env("DATA_SOURCE") == "mock":
+        return MockSource()
+    if env("DATA_SOURCE") == "yahoo" or not env("TL_PASSWORD"):
+        return YahooSource()
+    try:
+        tl = TradeLocker()
+        tl.note = "TradeLocker"
+        return tl
+    except Exception as e:
+        print(f"{e}\n→ перемикаюсь на Yahoo")
+        return YahooSource()
 
 
 def closed_only(df, tf):
@@ -453,9 +512,11 @@ def build_contexts(cache):
     return ctx, errors
 
 
-def send_morning(ctx, errors):
+def send_morning(ctx, errors, source_note=""):
     now = datetime.now(LOCAL_TZ)
     lines = [f"☀️ <b>Денний контекст</b> · {DAYS_UA[now.weekday()]} {now:%d.%m}"]
+    if source_note and source_note != "TradeLocker":
+        lines.append(f"<i>дані: {source_note}</i>")
     album = []
     for sym in SYMBOLS:
         if sym in errors:
@@ -559,7 +620,7 @@ def run_loop(src):
     state = load_state()
     today = datetime.now(LOCAL_TZ).strftime("%Y-%m-%d")
     if state.get("morning") != today:
-        send_morning(ctx, errors)
+        send_morning(ctx, errors, getattr(src, "note", ""))
         state["morning"] = today
         save_state(state)
 
@@ -583,9 +644,9 @@ def main():
         return
     src = make_source()
     if mode == "symbols":
-        send_text("📋 <b>Інструменти у брокера</b> (впиши потрібні назви в SYMBOLS):\n" + ", ".join(src.names()))
+        send_text(f"📋 <b>Інструменти</b> · джерело: {getattr(src, 'note', '')}\n" + ", ".join(src.names()))
     elif mode == "morning":
-        send_morning(*build_contexts(BarCache(src)))
+        send_morning(*build_contexts(BarCache(src)), getattr(src, "note", ""))
     elif mode == "once":
         cache = BarCache(src)
         ctx, _ = build_contexts(cache)

@@ -3,3 +3,4 @@ pandas>=2.1
 numpy>=1.26
 matplotlib>=3.8
 tzdata
+yfinance>=0.2.50
