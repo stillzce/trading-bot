@@ -49,7 +49,7 @@ def split(v):
     return [s.strip() for s in v.split(",") if s.strip()]
 
 
-SYMBOLS = split(env("SYMBOLS", "US500,NAS100,GER40,EURUSD,GBPUSD"))
+SYMBOLS = split(env("SYMBOLS", "US500,NAS100,GER40,EURUSD,GBPUSD,XAUUSD"))
 SIGNAL_TFS = split(env("SIGNAL_TFS", "1m,5m,15m,30m,1H,4H,1D"))
 WT_N1 = int(env("WT_CHANNEL", "10"))
 WT_N2 = int(env("WT_AVERAGE", "21"))
