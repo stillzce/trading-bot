@@ -53,8 +53,8 @@ SYMBOLS = split(env("SYMBOLS", "US500,NAS100,GER40,EURUSD,GBPUSD,XAUUSD"))
 SIGNAL_TFS = split(env("SIGNAL_TFS", "1m,5m,15m,30m,1H,4H,1D"))
 WT_N1 = int(env("WT_CHANNEL", "10"))
 WT_N2 = int(env("WT_AVERAGE", "21"))
-WT_OB = float(env("WT_OB", "53"))
-WT_OS = float(env("WT_OS", "-53"))
+WT_OB = float(env("WT_OB", "60"))
+WT_OS = float(env("WT_OS", "-60"))
 LOCAL_TZ = ZoneInfo(env("LOCAL_TZ", "Europe/Kyiv"))
 WORK_START = env("WORK_START", "08:00")
 WORK_END = env("WORK_END", "23:00")
@@ -391,7 +391,7 @@ def fmt(x):
     return f"{x:,.5f}".replace(",", " ") if abs(x) < 20 else f"{x:,.1f}".replace(",", " ")
 
 
-def chart(df, title, pdh=None, pdl=None, mark=None, bars=90, daily=False):
+def chart(df, title, pdh=None, pdl=None, mark=None, bars=90, daily=False, mark_back=0):
     wt1, wt2 = wavetrend(df)
     n = min(bars, len(df))
     df, wt1, wt2 = df.tail(n), wt1.tail(n), wt2.tail(n)
@@ -403,12 +403,19 @@ def chart(df, title, pdh=None, pdl=None, mark=None, bars=90, daily=False):
     body_h = np.maximum(np.abs(df["close"] - df["open"]).to_numpy(), (df["high"].max() - df["low"].min()) * 0.0015)
     ax.vlines(x, df["low"], df["high"], color=col, lw=0.8)
     ax.bar(x, body_h, bottom=np.minimum(df["open"], df["close"]).to_numpy(), color=col, width=0.65)
+    lo, hi = df["low"].min(), df["high"].max()
+    span = hi - lo
     for lvl, name, c in ((pdh, "PDH", "#26a69a"), (pdl, "PDL", "#ef5350")):
+        if lvl is not None and not (lo - span <= lvl <= hi + span):
+            # рівень далеко від видимих свічок — не стискати графік, лише підписати
+            ax.text(0.01, 0.97 if lvl > hi else 0.03, f"{name} {fmt(lvl)} {'↑' if lvl > hi else '↓'}",
+                    transform=ax.transAxes, color=c, fontsize=8, va="top" if lvl > hi else "bottom")
+            continue
         if lvl is not None:
             ax.axhline(lvl, color=c, ls="--", lw=1)
             ax.text(n + 13, lvl, f"{name} {fmt(lvl)}", color=c, ha="right", va="bottom", fontsize=8)
     if mark:
-        i = n - 1
+        i = n - 1 - mark_back  # mark_back > 0 — стрілка не на останній свічці (для прикладів)
         long_ = mark == "LONG"
         ax.annotate("▲" if long_ else "▼", (i, df["low"].iloc[i] if long_ else df["high"].iloc[i]),
                     color="#26a69a" if long_ else "#ef5350", ha="center", va="top" if long_ else "bottom", fontsize=14)
@@ -637,8 +644,53 @@ def run_loop(src):
     print(f"Завершую о {datetime.now(LOCAL_TZ):%H:%M}.")
 
 
+def run_example(src, symbol, per_tf=1, after=15):
+    """Показати, як виглядали б сьогоднішні сигнали по інструменту (за контекстом дня)."""
+    cache = BarCache(src)
+    c = context(cache, symbol)
+    start = pd.Timestamp(datetime.now(LOCAL_TZ).replace(hour=0, minute=0, second=0, microsecond=0)).tz_convert("UTC")
+    found, against = [], 0
+    for tf in SIGNAL_TFS:
+        if tf == "1D":
+            continue
+        df = cache.get(symbol, tf)
+        if len(df) < 60:
+            continue
+        wt1, wt2 = wavetrend(df)
+        dur = pd.Timedelta(minutes=TF_MIN[tf])
+        tf_hits = []
+        for i in range(1, len(df)):
+            if df.index[i] < start:
+                continue
+            side = wt_extreme_cross(wt1, wt2, i)
+            if not side:
+                continue
+            if (side == "LONG" and c["bias"] == "BULL") or (side == "SHORT" and c["bias"] == "BEAR"):
+                tf_hits.append((df.index[i] + dur, tf, side, i, df, wt1, wt2))
+            else:
+                against += 1
+        found += tf_hits[-per_tf:]
+    head = (f"🧪 <b>Приклад: {symbol} сьогодні</b>\nКонтекст дня: {BIAS_ICON[c['bias']]} {c['bias']} — {c['note']}\n"
+            f"Сигналів за контекстом (останній на кожному ТФ): {len(found)}; проти контексту відкинуто: {against}")
+    send_text(head)
+    for when, tf, side, i, df, wt1, wt2 in sorted(found, key=lambda h: TF_MIN[h[1]]):
+        icon = "🟢" if side == "LONG" else "🔴"
+        caption = (
+            f"🧪 ПРИКЛАД · {icon} <b>{side} · {symbol} · {TF_LABEL[tf]}</b>\n"
+            f"WT {'дно' if side == 'LONG' else 'вершина'}, перетин {'вгору' if side == 'LONG' else 'вниз'}: "
+            f"{wt1.iloc[i]:.0f} / {wt2.iloc[i]:.0f}\n"
+            f"Контекст дня: {BIAS_ICON[c['bias']]} {c['bias']} — {c['note']}\n"
+            f"Ціна: {fmt(df['close'].iloc[i])} · свічка закрилась {when.tz_convert(LOCAL_TZ):%H:%M}"
+        )
+        k = min(after, len(df) - 1 - i)  # показати, що було після сигналу
+        png = chart(df.iloc[: i + 1 + k], f"{symbol} · {TF_LABEL[tf]} · {side} (приклад)", c["pdh"], c["pdl"],
+                    mark=side, mark_back=k)
+        send_photo(png, caption)
+
+
 def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else "loop"
+    mode, _, arg = mode.partition(":")
     if mode == "test":
         send_text("✅ Бот на зв'язку")
         return
@@ -647,6 +699,8 @@ def main():
         send_text(f"📋 <b>Інструменти</b> · джерело: {getattr(src, 'note', '')}\n" + ", ".join(src.names()))
     elif mode == "morning":
         send_morning(*build_contexts(BarCache(src)), getattr(src, "note", ""))
+    elif mode == "example":
+        run_example(src, (arg or "GBPUSD").upper())
     elif mode == "once":
         cache = BarCache(src)
         ctx, _ = build_contexts(cache)
