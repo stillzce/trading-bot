@@ -214,6 +214,59 @@ class MockSource:
         return df
 
 
+class OandaSource:
+    """OANDA v20 API (демо/practice): CFD-котирування без затримки. Потрібен OANDA_TOKEN."""
+
+    note = "OANDA"
+    INSTR = {"US500": "SPX500_USD", "SPX500": "SPX500_USD", "NAS100": "NAS100_USD", "GER40": "DE30_EUR",
+             "DE40": "DE30_EUR", "EURUSD": "EUR_USD", "GBPUSD": "GBP_USD", "XAUUSD": "XAU_USD", "US30": "US30_USD"}
+    GRAN = {"1m": "M1", "5m": "M5", "15m": "M15", "30m": "M30", "1H": "H1", "4H": "H4"}
+
+    def __init__(self):
+        live = env("OANDA_ENV", "practice").lower() == "live"
+        self.base = f"https://api-{'fxtrade' if live else 'fxpractice'}.oanda.com/v3"
+        self.s = requests.Session()
+        self.s.headers["Authorization"] = f"Bearer {need('OANDA_TOKEN')}"
+        r = self.s.get(self.base + "/accounts", timeout=30)
+        if not r.ok:
+            raise RuntimeError(f"OANDA: токен не підійшов ({r.status_code}): {r.text[:200]}")
+
+    def instrument(self, symbol):
+        s = symbol.upper().split(".")[0]
+        return self.INSTR.get(s, symbol)
+
+    def names(self):
+        return [f"{s} → {self.instrument(s)}" for s in SYMBOLS]
+
+    def bars(self, symbol, resolution, frm, to=None):
+        inst, gran = self.instrument(symbol), self.GRAN[resolution]
+        step = pd.Timedelta(minutes=TF_MIN[resolution])
+        now = pd.Timestamp.now(tz="UTC")
+        rows, cur = [], frm
+        for _ in range(20):  # до 20 сторінок по 5000 свічок
+            r = None
+            for attempt in range(3):
+                r = self.s.get(f"{self.base}/instruments/{inst}/candles", timeout=30, params={
+                    "granularity": gran, "price": "M", "from": cur.strftime("%Y-%m-%dT%H:%M:%SZ"), "count": 5000})
+                if r.ok:
+                    break
+                time.sleep(2 + attempt * 3)
+            if not r.ok:
+                raise RuntimeError(f"OANDA {inst} {gran}: {r.status_code} {r.text[:200]}")
+            candles = r.json().get("candles", [])
+            for c in candles:
+                m = c["mid"]
+                rows.append((pd.Timestamp(c["time"]).tz_convert("UTC"), float(m["o"]), float(m["h"]),
+                             float(m["l"]), float(m["c"])))
+            if len(candles) < 5000 or not rows or rows[-1][0] + step >= now:
+                break
+            cur = rows[-1][0] + step
+        if not rows:
+            return EMPTY.copy()
+        df = pd.DataFrame(rows, columns=["t", "open", "high", "low", "close"]).set_index("t").sort_index()
+        return df[~df.index.duplicated(keep="last")]
+
+
 class YahooSource:
     """Запасне джерело: Yahoo Finance (ф'ючерси/індекси/форекс), без акаунтів. Ф'ючерси CME там із затримкою ~10 хв."""
 
@@ -229,6 +282,10 @@ class YahooSource:
     def ticker(self, symbol):
         s = symbol.upper().split(".")[0]
         return self.TICKERS.get(s, symbol)
+
+    def min_tf(self, symbol):
+        """Ф'ючерси/індекси на Yahoo із затримкою 10–30 хв — M1/M5 для них марні, лише від M15."""
+        return 1 if self.ticker(symbol).endswith("=X") else 15
 
     def names(self):
         return [f"{s} → {self.ticker(s)}" for s in SYMBOLS]
@@ -263,18 +320,24 @@ class YahooSource:
 
 
 def make_source():
-    """TradeLocker, а якщо не пускає — Yahoo. Коли пароль запрацює, бот сам повернеться на TradeLocker."""
+    """Пріоритет: TradeLocker → OANDA → Yahoo. Хто перший пустив — з того й беремо дані."""
     if env("DATA_SOURCE") == "mock":
         return MockSource()
-    if env("DATA_SOURCE") == "yahoo" or not env("TL_PASSWORD"):
-        return YahooSource()
-    try:
-        tl = TradeLocker()
-        tl.note = "TradeLocker"
-        return tl
-    except Exception as e:
-        print(f"{e}\n→ перемикаюсь на Yahoo")
-        return YahooSource()
+    if env("DATA_SOURCE") != "yahoo":
+        if env("TL_PASSWORD"):
+            try:
+                tl = TradeLocker()
+                tl.note = "TradeLocker"
+                return tl
+            except Exception as e:
+                print(f"{e}")
+        if env("OANDA_TOKEN"):
+            try:
+                return OandaSource()
+            except Exception as e:
+                print(f"{e}")
+    print("→ дані з Yahoo")
+    return YahooSource()
 
 
 def closed_only(df, tf):
@@ -559,8 +622,9 @@ def check_cycle(cache, ctx, state, first=False):
     sent = state.setdefault("sent", [])
     for sym, c in ctx.items():
         hits = []  # (tf, side, df, wt1, wt2, i)
+        min_tf = cache.src.min_tf(sym) if hasattr(cache.src, "min_tf") else 1
         for tf in SIGNAL_TFS:
-            if not due(tf, minute_idx, first):
+            if not due(tf, minute_idx, first) or TF_MIN[tf] < min_tf:
                 continue
             try:
                 df = c["days"] if tf == "1D" else cache.get(sym, tf)

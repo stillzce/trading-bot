@@ -55,6 +55,8 @@ jobs:
           TL_PASSWORD: ${{ secrets.TL_PASSWORD }}
           TL_SERVER: ${{ secrets.TL_SERVER }}
           TL_ACC_NUM: ${{ secrets.TL_ACC_NUM }}
+          OANDA_TOKEN: ${{ secrets.OANDA_TOKEN }}
+          OANDA_ENV: ${{ secrets.OANDA_ENV }}
           SYMBOLS: ${{ vars.SYMBOLS }}
           SIGNAL_TFS: ${{ vars.SIGNAL_TFS }}
           WT_OB: ${{ vars.WT_OB }}
