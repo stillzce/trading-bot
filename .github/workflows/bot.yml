@@ -1,0 +1,82 @@
+name: trading-bot
+
+# Бот працює пн–пт з 08:00 до 23:00 за Києвом.
+# Один запуск GitHub живе максимум 6 год, тому день поділено на 3 зміни;
+# наступна зміна стає в чергу й стартує, щойно попередня завершиться.
+on:
+  schedule:
+    - cron: "52 7 * * 1-5"
+      timezone: "Europe/Kyiv"
+    - cron: "52 12 * * 1-5"
+      timezone: "Europe/Kyiv"
+    - cron: "52 17 * * 1-5"
+      timezone: "Europe/Kyiv"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "loop / morning / once / symbols / test"
+        default: "test"
+
+concurrency:
+  group: trading-bot
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: write   # щоб бот сам продовжував розклад (GitHub вимикає його після 60 днів без комітів)
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Відновити стан (уже надіслані сигнали)
+        uses: actions/cache/restore@v4
+        with:
+          path: state
+          key: state-${{ github.run_id }}
+          restore-keys: state-
+
+      - name: Запуск
+        env:
+          TG_TOKEN: ${{ secrets.TG_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          TL_ENV: ${{ secrets.TL_ENV }}
+          TL_EMAIL: ${{ secrets.TL_EMAIL }}
+          TL_PASSWORD: ${{ secrets.TL_PASSWORD }}
+          TL_SERVER: ${{ secrets.TL_SERVER }}
+          TL_ACC_NUM: ${{ secrets.TL_ACC_NUM }}
+          SYMBOLS: ${{ vars.SYMBOLS }}
+          SIGNAL_TFS: ${{ vars.SIGNAL_TFS }}
+          WT_OB: ${{ vars.WT_OB }}
+          WT_OS: ${{ vars.WT_OS }}
+          WORK_START: ${{ vars.WORK_START }}
+          WORK_END: ${{ vars.WORK_END }}
+        run: |
+          mkdir -p state
+          MODE="loop"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then MODE="${{ inputs.mode }}"; fi
+          python bot.py "$MODE"
+
+      - name: Зберегти стан
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: state
+          key: state-${{ github.run_id }}
+
+      - name: Не дати GitHub вимкнути розклад
+        if: always()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow enable bot.yml --repo "${{ github.repository }}"
