@@ -16,8 +16,10 @@ on:
         description: "loop / morning / once / symbols / test"
         default: "test"
 
+# Постійна робота (loop/розклад) — по черзі, одна за одною.
+# Разові команди (test, morning, stats, example...) — окремо, не чекають на loop.
 concurrency:
-  group: trading-bot
+  group: ${{ (github.event_name == 'schedule' || inputs.mode == 'loop') && 'trading-bot-loop' || format('trading-bot-{0}', github.run_id) }}
   cancel-in-progress: false
 
 permissions:
