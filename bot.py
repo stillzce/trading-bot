@@ -943,6 +943,18 @@ def run_stats(src):
     send_text("\n".join(lines))
 
 
+def run_diag(src, arg):
+    """Діагностика: останні свічки й значення WT (у Telegram нічого не шле). diag:NAS100:1m"""
+    sym, _, tf = arg.partition(":")
+    tf = tf or "1m"
+    df = closed_only(src.bars(sym.upper(), tf, pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=FIRST_FETCH_DAYS.get(tf, 5))), tf)
+    w1, w2 = wavetrend(df)
+    dur = pd.Timedelta(minutes=TF_MIN[tf])
+    for i in range(max(1, len(df) - 90), len(df)):
+        mark = wt_extreme_cross(w1, w2, i) or ""
+        print(f"{(df.index[i] + dur).tz_convert(LOCAL_TZ):%H:%M} close {df['close'].iloc[i]:.2f} WT {w1.iloc[i]:7.1f} {mark}")
+
+
 def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else "loop"
     mode, _, arg = mode.partition(":")
@@ -961,6 +973,8 @@ def main():
             os.environ["BT_DAYS"] = arg
         import backtest
         backtest.run(src)
+    elif mode == "diag":
+        run_diag(src, arg)
     elif mode == "stats":
         run_stats(src)
     elif mode == "example":
