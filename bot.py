@@ -274,10 +274,14 @@ class OandaSource:
 
 
 class OkxSource:
-    """OKX public API (без ключів): поки що лише золото — перп XAU-USDT-SWAP, реальний час, 24/7."""
+    """OKX public API (без ключів), реальний час, 24/7.
+    US500 → перп на індекс S&P 500; NAS100 → перп на ETF QQQ (ціна ~в 40 разів менша, рух той самий);
+    золото → XAU-USDT-SWAP. SPX-USDT-SWAP НЕ беремо: це мем-коїн SPX6900, а не індекс."""
 
     BASE = "https://www.okx.com/api/v5"
-    CANDIDATES = {"XAUUSD": ["XAU-USDT-SWAP", "XAUT-USDT-SWAP", "XAUT-USDT"]}
+    CANDIDATES = {"XAUUSD": ["XAU-USDT-SWAP", "XAUT-USDT-SWAP", "XAUT-USDT"],
+                  "US500": ["US500-USDT-SWAP"], "SPX500": ["US500-USDT-SWAP"],
+                  "NAS100": ["QQQ-USDT-SWAP"], "NDX100": ["QQQ-USDT-SWAP"]}
     BAR = {"1m": "1m", "5m": "5m", "15m": "15m", "30m": "30m", "1H": "1H", "4H": "4H"}
 
     def __init__(self):
@@ -299,7 +303,8 @@ class OkxSource:
         return symbol.upper() in self.ids
 
     def label(self, symbol):
-        return f"OKX {self.ids[symbol.upper()]}"
+        inst = self.ids[symbol.upper()]
+        return f"OKX {inst}" + (" (ETF QQQ, інший масштаб ціни)" if inst.startswith("QQQ") else "")
 
     def bars(self, symbol, resolution, frm, to=None):
         inst, bar = self.ids[symbol.upper()], self.BAR[resolution]
@@ -334,7 +339,7 @@ class OkxSource:
 
 
 class MixedSource:
-    """Поки немає брокера: золото з OKX (реальний час), решта — з Yahoo."""
+    """Поки немає брокера: що є на OKX — з OKX (реальний час), решта (форекс, GER40) — з Yahoo."""
 
     def __init__(self):
         self.yahoo = YahooSource()
@@ -343,8 +348,8 @@ class MixedSource:
         except Exception as e:
             print(f"OKX недоступний: {e}")
             self.okx = None
-        parts = ["Yahoo"] + (["OKX (золото)"] if self.okx and self.okx.ids else [])
-        self.note = " + ".join(parts)
+        on_okx = ", ".join(sorted(self.okx.ids)) if self.okx and self.okx.ids else ""
+        self.note = f"OKX ({on_okx}) + Yahoo (решта)" if on_okx else "Yahoo"
 
     def pick(self, symbol):
         return self.okx if self.okx and self.okx.has(symbol) else self.yahoo
