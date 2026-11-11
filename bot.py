@@ -702,7 +702,7 @@ def run_stats(src):
         except Exception as e:
             lines.append(f"\n⚠️ <b>{sym}</b>: {e}")
             continue
-        parts, s_with, s_against = [], 0, 0
+        parts, valid, s_with, s_against = [], [], 0, 0
         for tf in SIGNAL_TFS:
             if tf == "1D":
                 continue
@@ -715,6 +715,7 @@ def run_stats(src):
                 continue
             wt1, wt2 = wavetrend(df)
             w = a = 0
+            dur = pd.Timedelta(minutes=TF_MIN[tf])
             for i in range(1, len(df)):
                 if df.index[i] < start:
                     continue
@@ -723,6 +724,8 @@ def run_stats(src):
                     continue
                 if (side == "LONG" and c["bias"] == "BULL") or (side == "SHORT" and c["bias"] == "BEAR"):
                     w += 1
+                    t = (df.index[i] + dur).tz_convert(LOCAL_TZ).strftime("%H:%M")
+                    valid.append(f"{TF_LABEL[tf]} {t} @ {fmt(df['close'].iloc[i])}")
                 else:
                     a += 1
             s_with += w
@@ -733,6 +736,10 @@ def run_stats(src):
         tot_against += s_against
         lines.append(f"\n{BIAS_ICON[c['bias']]} <b>{sym}</b> ({c['bias']}): ✅ {s_with} · ❌ {s_against}"
                      + (f"\n   {' · '.join(parts)}" if parts else "\n   сигналів не було"))
+        if valid:
+            arrow = "🟢 LONG" if c["bias"] == "BULL" else "🔴 SHORT"
+            lines.append(f"   ✅ {arrow} (час закриття свічки, ціна):")
+            lines += [f"      • {v}" for v in sorted(valid, key=lambda v: v.split()[1])]
     lines.append(f"\n<b>Разом:</b> ✅ {tot_with} · ❌ {tot_against}")
     send_text("\n".join(lines))
 
