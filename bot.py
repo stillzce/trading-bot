@@ -944,9 +944,14 @@ def run_stats(src):
 
 
 def run_diag(src, arg):
-    """Діагностика: останні свічки й значення WT (у Telegram нічого не шле). diag:NAS100:1m"""
-    sym, _, tf = arg.partition(":")
-    tf = tf or "1m"
+    """Діагностика: останні свічки й значення WT (у Telegram нічого не шле). diag:NAS100:1m або diag:NAS100:1m,5m,15m"""
+    sym, _, tfs = arg.partition(":")
+    for tf in (tfs or "1m").split(","):
+        print(f"===== {sym} {tf}")
+        _diag_one(src, sym, tf)
+
+
+def _diag_one(src, sym, tf):
     df = closed_only(src.bars(sym.upper(), tf, pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=FIRST_FETCH_DAYS.get(tf, 5))), tf)
     w1, w2 = wavetrend(df)
     dur = pd.Timedelta(minutes=TF_MIN[tf])
