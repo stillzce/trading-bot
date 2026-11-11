@@ -932,6 +932,9 @@ def main():
         send_text(f"📋 <b>Інструменти</b> · джерело: {getattr(src, 'note', '')}\n" + "\n".join(names))
     elif mode == "morning":
         send_morning(*build_contexts(BarCache(src)), getattr(src, "note", ""))
+    elif mode == "backtest":
+        import backtest
+        backtest.run(src)
     elif mode == "stats":
         run_stats(src)
     elif mode == "example":
