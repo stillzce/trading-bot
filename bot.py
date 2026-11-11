@@ -162,6 +162,9 @@ class TradeLocker:
     def names(self):
         return sorted({i.get("name", "") for i in self.instruments()})
 
+    def label(self, symbol):
+        return f"TradeLocker {env('TL_SERVER', '')}".strip()
+
     def _resolve(self, symbol):
         if symbol in self._ids:
             return self._ids[symbol]
@@ -235,6 +238,9 @@ class OandaSource:
         s = symbol.upper().split(".")[0]
         return self.INSTR.get(s, symbol)
 
+    def label(self, symbol):
+        return f"OANDA {self.instrument(symbol)}"
+
     def names(self):
         return [f"{s} → {self.instrument(s)}" for s in SYMBOLS]
 
@@ -267,6 +273,100 @@ class OandaSource:
         return df[~df.index.duplicated(keep="last")]
 
 
+class OkxSource:
+    """OKX public API (без ключів): поки що лише золото — перп XAU-USDT-SWAP, реальний час, 24/7."""
+
+    BASE = "https://www.okx.com/api/v5"
+    CANDIDATES = {"XAUUSD": ["XAU-USDT-SWAP", "XAUT-USDT-SWAP", "XAUT-USDT"]}
+    BAR = {"1m": "1m", "5m": "5m", "15m": "15m", "30m": "30m", "1H": "1H", "4H": "4H"}
+
+    def __init__(self):
+        self.s = requests.Session()
+        self.ids = {}
+        live = set()
+        for kind in ("SWAP", "SPOT"):
+            r = self.s.get(f"{self.BASE}/public/instruments", params={"instType": kind}, timeout=30)
+            r.raise_for_status()
+            live |= {i["instId"] for i in r.json().get("data", [])}
+        for sym, cands in self.CANDIDATES.items():
+            hit = next((c for c in cands if c in live), None)
+            if hit:
+                self.ids[sym] = hit
+        # для довідки: чи є на OKX інструменти на індекси
+        self.extra = sorted(i for i in live if any(k in i for k in ("SPY", "QQQ", "SPX", "NAS", "NDX", "US500")))
+
+    def has(self, symbol):
+        return symbol.upper() in self.ids
+
+    def label(self, symbol):
+        return f"OKX {self.ids[symbol.upper()]}"
+
+    def bars(self, symbol, resolution, frm, to=None):
+        inst, bar = self.ids[symbol.upper()], self.BAR[resolution]
+        frm_ms = int(frm.timestamp() * 1000)
+        rows, after = [], None
+        for _ in range(150):  # пагінація назад у часі по 100 свічок
+            params = {"instId": inst, "bar": bar, "limit": 100}
+            if after:
+                params["after"] = after
+            r = self.s.get(f"{self.BASE}/market/history-candles", params=params, timeout=30)
+            if r.status_code == 429:
+                time.sleep(2)
+                continue
+            r.raise_for_status()
+            data = r.json().get("data", [])
+            if not data:
+                break
+            rows += data
+            oldest = int(data[-1][0])
+            if oldest <= frm_ms or len(data) < 100:
+                break
+            after = oldest
+            time.sleep(0.12)
+        if not rows:
+            return EMPTY.copy()
+        df = pd.DataFrame([(int(x[0]), float(x[1]), float(x[2]), float(x[3]), float(x[4])) for x in rows],
+                          columns=["t", "open", "high", "low", "close"])
+        df["t"] = pd.to_datetime(df["t"], unit="ms", utc=True)
+        df = df.set_index("t").sort_index()
+        df = df[~df.index.duplicated(keep="last")]
+        return df[df.index >= frm]
+
+
+class MixedSource:
+    """Поки немає брокера: золото з OKX (реальний час), решта — з Yahoo."""
+
+    def __init__(self):
+        self.yahoo = YahooSource()
+        try:
+            self.okx = OkxSource()
+        except Exception as e:
+            print(f"OKX недоступний: {e}")
+            self.okx = None
+        parts = ["Yahoo"] + (["OKX (золото)"] if self.okx and self.okx.ids else [])
+        self.note = " + ".join(parts)
+
+    def pick(self, symbol):
+        return self.okx if self.okx and self.okx.has(symbol) else self.yahoo
+
+    def label(self, symbol):
+        return self.pick(symbol).label(symbol)
+
+    def min_tf(self, symbol):
+        src = self.pick(symbol)
+        return src.min_tf(symbol) if hasattr(src, "min_tf") else 1
+
+    def bars(self, symbol, resolution, frm, to=None):
+        return self.pick(symbol).bars(symbol, resolution, frm, to)
+
+    def names(self):
+        out = [f"{s} → {self.label(s)}" + ("" if self.min_tf(s) == 1 else ", сигнали від M15")
+               for s in SYMBOLS]
+        if self.okx is not None:
+            out.append("OKX індекси: " + (", ".join(self.okx.extra) if self.okx.extra else "немає"))
+        return out
+
+
 class YahooSource:
     """Запасне джерело: Yahoo Finance (ф'ючерси/індекси/форекс), без акаунтів. Ф'ючерси CME там із затримкою ~10 хв."""
 
@@ -282,6 +382,9 @@ class YahooSource:
     def ticker(self, symbol):
         s = symbol.upper().split(".")[0]
         return self.TICKERS.get(s, symbol)
+
+    def label(self, symbol):
+        return f"Yahoo {self.ticker(symbol)}" + ("" if self.ticker(symbol).endswith("=X") else " (затримка)")
 
     def min_tf(self, symbol):
         """Ф'ючерси/індекси на Yahoo із затримкою 10–30 хв — M1/M5 для них марні, лише від M15."""
@@ -336,8 +439,8 @@ def make_source():
                 return OandaSource()
             except Exception as e:
                 print(f"{e}")
-    print("→ дані з Yahoo")
-    return YahooSource()
+    print("→ дані з Yahoo/OKX")
+    return MixedSource()
 
 
 def closed_only(df, tf):
@@ -433,7 +536,8 @@ def context(cache, sym):
                 bias, why, from_day = b, w, day_name(days.index[-k])
                 break
     note = f"вчора {first_why} → контекст зі свічки {from_day}: {why}" if from_day else why
-    return dict(bias=bias, note=note, pdh=y.high, pdl=y.low, days=days)
+    src = cache.src.label(sym) if hasattr(cache.src, "label") else ""
+    return dict(bias=bias, note=note, pdh=y.high, pdl=y.low, days=days, src=src)
 
 
 def wt_extreme_cross(wt1, wt2, i):
@@ -599,6 +703,7 @@ def send_morning(ctx, errors, source_note=""):
         lines.append(
             f"\n{BIAS_ICON[c['bias']]} <b>{sym}</b> — <b>{c['bias']}</b>: {c['note']}"
             f"\n   PDH {fmt(c['pdh'])} · PDL {fmt(c['pdl'])} · WT D {wt:.0f}{'↑' if wt > w1.iloc[-2] else '↓'}{zone}"
+            + (f"\n   <i>дані: {c['src']}</i>" if c.get("src") else "")
         )
         png = chart(c["days"], f"{sym} · D1 · контекст {c['bias']}", c["pdh"], c["pdl"], bars=40, daily=True)
         album.append((png, f"{BIAS_ICON[c['bias']]} <b>{sym}</b> — {c['bias']}: {c['note']}"))
@@ -662,6 +767,7 @@ def check_cycle(cache, ctx, state, first=False):
             f"WT {where}, перетин {'вгору' if side == 'LONG' else 'вниз'}:\n{wts}\n"
             f"Контекст дня: {BIAS_ICON[c['bias']]} {c['bias']} — {c['note']}\n"
             f"Ціна: {fmt(price)} · {datetime.now(LOCAL_TZ):%H:%M}"
+            + (f"\nДані: {c['src']}" if c.get("src") else "")
         )
         png = chart(df_top.iloc[: i_top + 1], f"{sym} · {TF_LABEL[tf_top]} · {side}", c["pdh"], c["pdl"],
                     mark=side, daily=tf_top == "1D")
@@ -816,7 +922,9 @@ def main():
         return
     src = make_source()
     if mode == "symbols":
-        send_text(f"📋 <b>Інструменти</b> · джерело: {getattr(src, 'note', '')}\n" + ", ".join(src.names()))
+        names = src.names()
+        print("\n".join(names))
+        send_text(f"📋 <b>Інструменти</b> · джерело: {getattr(src, 'note', '')}\n" + "\n".join(names))
     elif mode == "morning":
         send_morning(*build_contexts(BarCache(src)), getattr(src, "note", ""))
     elif mode == "stats":
