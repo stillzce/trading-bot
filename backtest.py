@@ -18,7 +18,8 @@ WaveTrend — як у скрипті «WaveTrend BK»: tci = EMA(ci, 21), ci в�
 Стоп — за дном (з урахуванням свіпів). Вхід — по закриттю свічки сигналу.
 Виходи (паралельно): тейк 1R / 2R / 3R, ціль PDH/PDL, «до кінця дня», «БУ на 1R, далі до кінця дня».
 Незакрите закривається в кінці торгового дня (17:00 NY). Стоп і тейк в одній свічці → стоп.
-Спред/комісії не враховуються. Угоди на різних ТФ рахуються окремо.
+Спред+прослизання віднімаються з кожної угоди (COST); стоп коротший за 3×COST — вхід пропускаємо. Угоди на різних ТФ рахуються окремо.
+Окремо рахуються перша і друга половина періоду — перевірка, чи результат стабільний у часі.
 """
 import json
 import os
@@ -31,6 +32,8 @@ import bot
 DAYS = int(os.environ.get("BT_DAYS", "90"))
 TFS = [t for t in os.environ.get("BT_TFS", "5m,15m,30m,1H,4H").split(",") if t]
 MODES = ["A", "B", "C"]
+# витрати на угоду (спред + прослизання, вхід і вихід разом) у ціні джерела даних
+COST = {"US500": 0.8, "NAS100": 0.06, "GER40": 2.0, "EURUSD": 0.00012, "GBPUSD": 0.00016, "XAUUSD": 0.45}
 EXITS = ["1R", "2R", "3R", "PD", "EOD", "BE"]
 
 
@@ -46,8 +49,14 @@ def session_table(h1):
                 if bb != "NEUTRAL":
                     bias = bb
                     break
-        start = hist.index[-1] + pd.Timedelta(hours=24)
-        rows.append((start, start + pd.Timedelta(hours=24), bias, hist.iloc[-1].high, hist.iloc[-1].low))
+        # наступна торгова сесія після останнього закритого дня (вихідні пропускаємо; час — завжди 17:00 NY)
+        shift = pd.Timedelta(hours=24 - bot.SESSION_CLOSE_HOUR)
+        d = (hist.index[-1].tz_convert(bot.SESSION_TZ) + shift).date() + pd.Timedelta(days=1)
+        while d.weekday() >= 5:
+            d += pd.Timedelta(days=1)
+        start = (pd.Timestamp(d).tz_localize(bot.SESSION_TZ) - shift).tz_convert("UTC")
+        end = (pd.Timestamp(d + pd.Timedelta(days=1)).tz_localize(bot.SESSION_TZ) - shift).tz_convert("UTC")
+        rows.append((start, end, bias, hist.iloc[-1].high, hist.iloc[-1].low))
     return pd.DataFrame(rows, columns=["start", "end", "bias", "pdh", "pdl"])
 
 
@@ -95,11 +104,11 @@ def find_entries(o, h, l, c, w1, w2):
     return out
 
 
-def simulate(h, l, c, i, stop, end_i, target_pd):
+def simulate(h, l, c, i, stop, end_i, target_pd, cost=0.0):
     entry = c[i]
     risk = entry - stop
-    if not risk > 0:
-        return None
+    if not risk > 0 or risk < 3 * cost:
+        return None  # стоп коротший за 3 спреди — такий вхід не беремо
     fh, fl, fc = h[i + 1:end_i], l[i + 1:end_i], c[i + 1:end_i]
     eod_r = ((fc[-1] if len(fc) else entry) - entry) / risk
     pd_r = (target_pd - entry) / risk
@@ -117,7 +126,9 @@ def simulate(h, l, c, i, stop, end_i, target_pd):
 
     res = {"1R": run(1.0), "2R": run(2.0), "3R": run(3.0), "PD": run(pd_r) if pd_r > 0.3 else None,
            "EOD": run(None), "BE": run(None, be=True)}
-    out = {k: (round(float(v), 3) if v is not None else None) for k, v in res.items()}
+    cr = cost / risk  # витрати в R
+    out = {k: (round(float(v - cr), 3) if v is not None else None) for k, v in res.items()}
+    out["cost_R"] = round(cr, 3)
     out["risk_pct"] = risk / abs(entry) * 100
     return out
 
@@ -176,7 +187,8 @@ def run(src):
                     s = sess.iloc[k]
                     if t_close[i] > s["end"] or s["bias"] != ("BULL" if side == "LONG" else "BEAR"):
                         continue
-                    r = simulate(sh, sl_, sc, i, stop, int(ends[k]), s["pdh"] if side == "LONG" else -s["pdl"])
+                    r = simulate(sh, sl_, sc, i, stop, int(ends[k]), s["pdh"] if side == "LONG" else -s["pdl"],
+                                 COST.get(sym, 0.0))
                     if r:
                         trades.append(dict(sym=sym, tf=tf, mode=mode, side=side, t=str(t_close[i]), **r))
                         cnt += 1
@@ -190,6 +202,16 @@ def run(src):
             "by_tf": {tf: {e: stats([t[e] for t in tm if t["tf"] == tf]) for e in EXITS} for tf in TFS},
             "by_sym": {s: {e: stats([t[e] for t in tm if t["sym"] == s]) for e in EXITS} for s in bot.SYMBOLS},
             "median_risk_pct": round(float(np.median([t["risk_pct"] for t in tm])), 3) if tm else None,
+            "median_cost_R": round(float(np.median([t["cost_R"] for t in tm])), 3) if tm else None,
+            "halves": {},
         }
+        mid = str(since + (now - since) / 2)
+        for half, cond in (("1st", lambda t: t["t"] < mid), ("2nd", lambda t: t["t"] >= mid)):
+            th = [t for t in tm if cond(t)]
+            rep["modes"][m]["halves"][half] = {
+                "all": {e: stats([t[e] for t in th]) for e in EXITS},
+                "by_tf": {tf: {e: stats([t[e] for t in th if t["tf"] == tf]) for e in EXITS} for tf in TFS},
+                "by_sym": {s_: {e: stats([t[e] for t in th if t["sym"] == s_]) for e in EXITS} for s_ in bot.SYMBOLS},
+            }
     print("BACKTEST_JSON " + json.dumps(rep, ensure_ascii=False))
     return rep
