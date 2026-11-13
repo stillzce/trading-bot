@@ -33,7 +33,7 @@ DAYS = int(os.environ.get("BT_DAYS", "90"))
 TFS = [t for t in os.environ.get("BT_TFS", "5m,15m,30m,1H,4H").split(",") if t]
 MODES = ["A", "B", "C"]
 # витрати на угоду (спред + прослизання, вхід і вихід разом) у ціні джерела даних
-COST = {"US500": 0.8, "NAS100": 0.06, "GER40": 2.0, "EURUSD": 0.00012, "GBPUSD": 0.00016, "XAUUSD": 0.45}
+COST = {"US500": 0.8, "NAS100": 0.06, "GER40": 2.0, "EURUSD": 0.00012, "GBPUSD": 0.00016, "AUDUSD": 0.00012, "NZDUSD": 0.00016, "XAUUSD": 0.45}
 EXITS = ["1R", "2R", "3R", "PD", "EOD", "BE"]
 
 

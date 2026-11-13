@@ -49,7 +49,7 @@ def split(v):
     return [s.strip() for s in v.split(",") if s.strip()]
 
 
-SYMBOLS = split(env("SYMBOLS", "US500,NAS100,GER40,EURUSD,GBPUSD,XAUUSD"))
+SYMBOLS = split(env("SYMBOLS", "US500,NAS100,GER40,EURUSD,GBPUSD,AUDUSD,NZDUSD,XAUUSD"))
 SIGNAL_TFS = split(env("SIGNAL_TFS", "1m,5m,15m,30m,1H,4H,1D"))
 WT_N1 = int(env("WT_CHANNEL", "10"))
 WT_N2 = int(env("WT_AVERAGE", "21"))
@@ -223,7 +223,7 @@ class OandaSource:
 
     note = "OANDA"
     INSTR = {"US500": "SPX500_USD", "SPX500": "SPX500_USD", "NAS100": "NAS100_USD", "GER40": "DE30_EUR",
-             "DE40": "DE30_EUR", "EURUSD": "EUR_USD", "GBPUSD": "GBP_USD", "XAUUSD": "XAU_USD", "US30": "US30_USD"}
+             "DE40": "DE30_EUR", "EURUSD": "EUR_USD", "GBPUSD": "GBP_USD", "AUDUSD": "AUD_USD", "NZDUSD": "NZD_USD", "XAUUSD": "XAU_USD", "US30": "US30_USD"}
     GRAN = {"1m": "M1", "5m": "M5", "15m": "M15", "30m": "M30", "1H": "H1", "4H": "H4"}
 
     def __init__(self):
@@ -378,7 +378,7 @@ class YahooSource:
 
     note = "Yahoo (запасне джерело)"
     TICKERS = {"US500": "ES=F", "SPX500": "ES=F", "NAS100": "NQ=F", "NDX100": "NQ=F", "GER40": "^GDAXI",
-               "DE40": "^GDAXI", "EURUSD": "EURUSD=X", "GBPUSD": "GBPUSD=X", "XAUUSD": "GC=F", "US30": "YM=F"}
+               "DE40": "^GDAXI", "EURUSD": "EURUSD=X", "GBPUSD": "GBPUSD=X", "AUDUSD": "AUDUSD=X", "NZDUSD": "NZDUSD=X", "XAUUSD": "GC=F", "US30": "YM=F"}
     INTERVAL = {"1m": "1m", "5m": "5m", "15m": "15m", "30m": "30m", "1H": "60m", "4H": "60m"}
     MAX_DAYS = {"1m": 6.5, "5m": 58, "15m": 58, "30m": 58, "1H": 720, "4H": 720}
 

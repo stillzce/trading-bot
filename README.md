@@ -51,7 +51,7 @@
 
 | Змінна | За замовчуванням | Що робить |
 |---|---|---|
-| `SYMBOLS` | `US500,NAS100,GER40,EURUSD,GBPUSD,XAUUSD` | список інструментів |
+| `SYMBOLS` | `US500,NAS100,GER40,EURUSD,GBPUSD,AUDUSD,NZDUSD,XAUUSD` | список інструментів |
 | `SIGNAL_TFS` | `1m,5m,15m,30m,1H,4H,1D` | на яких таймфреймах ловити WT |
 | `WT_OB` / `WT_OS` | `60` / `-60` | рівні вершини та дна |
 | `WORK_START` / `WORK_END` | `08:00` / `23:00` | робочий час |
