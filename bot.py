@@ -788,10 +788,18 @@ def check_cycle(cache, ctx, state, first=False):
                     # свіп: дно сформувалось нижче PDL (вершина — вище PDH)
                     sess_start = c["days"].index[-1] + pd.Timedelta(hours=24)
                     swept = tf != "1D" and swept_today(df, wt1, i, side, c["pdl"] if side == "LONG" else c["pdh"], sess_start)
+                    lvl = c["pdl"] if side == "LONG" else c["pdh"]
+                    back = (df["close"].iloc[i] > lvl) if side == "LONG" else (df["close"].iloc[i] < lvl)
+                    swept = swept and back  # свіп = зняли рівень І повернулись за нього; пробій без повернення — не свіп
                     if with_bias:
                         kind = "ctx"
-                    elif swept and REVERSAL_ALERTS and tf != "1D":
-                        kind = "rev"
+                    elif REVERSAL_ALERTS and tf != "1D" and swept_today(df, wt1, i, side, lvl,
+                                                                     c["days"].index[-1] + pd.Timedelta(hours=24)):
+                        if back:
+                            kind = "rev"
+                        else:  # дно під PDL є, але ціна ще не повернулась — чекаємо повернення за рівень
+                            arm(state, sym, side, tf, ext, lvl, df.index[i] + dur)
+                            continue
                     else:
                         continue
                     key = f"{sym}|{tf}|{int(df.index[i].timestamp())}|{side}"
@@ -806,6 +814,75 @@ def check_cycle(cache, ctx, state, first=False):
                 group = [h for h in hh if h[1] == side]
                 if group:
                     send_signal(sym, c, group, side, kind)
+                    if kind == "rev":
+                        state.get("armed", {}).pop(f"{sym}|{side}", None)
+        check_armed(cache, sym, c, state)
+
+
+def arm(state, sym, side, tf, ext, lvl, when):
+    """Запам'ятати: WT вийшов із дна під PDL (з вершини над PDH), чекаємо повернення ціни за рівень."""
+    armed = state.setdefault("armed", {})
+    key = f"{sym}|{side}"
+    bar_key = f"{key}|{tf}|{int(when.timestamp())}"
+    if bar_key in state.setdefault("fired", []):
+        return  # по цьому виходу WT розворот уже надіслано
+    today = datetime.now(LOCAL_TZ).strftime("%Y-%m-%d")
+    a = armed.get(key)
+    if not a or a["date"] != today:
+        a = {"date": today, "ext": ext, "lvl": lvl, "tfs": [], "since": str(when), "bars": []}
+    if bar_key not in a.setdefault("bars", []):
+        a["bars"].append(bar_key)
+    a["ext"] = min(a["ext"], ext) if side == "LONG" else max(a["ext"], ext)
+    if TF_LABEL[tf] not in a["tfs"]:
+        a["tfs"].append(TF_LABEL[tf])
+    armed[key] = a
+
+
+def check_armed(cache, sym, c, state):
+    """Якщо ціна повернулась за PDL/PDH після виходу WT із дна/вершини — надсилаємо ⚡ розворот."""
+    armed = state.get("armed", {})
+    today = datetime.now(LOCAL_TZ).strftime("%Y-%m-%d")
+    for side in ("LONG", "SHORT"):
+        key = f"{sym}|{side}"
+        a = armed.get(key)
+        if not a:
+            continue
+        if a["date"] != today:
+            armed.pop(key, None)
+            continue
+        try:
+            m1 = cache.get(sym, "1m")
+        except Exception as e:
+            print(f"{sym}: armed check: {e}")
+            continue
+        if m1.empty:
+            continue
+        price = m1["close"].iloc[-1]
+        long_ = side == "LONG"
+        broken = price < a["ext"] if long_ else price > a["ext"]
+        back = price > a["lvl"] if long_ else price < a["lvl"]
+        if broken:  # дно/вершину зламано — сетап скасовано
+            armed.pop(key, None)
+            continue
+        if not back:
+            continue
+        armed.pop(key, None)
+        state.setdefault("fired", []).extend(a.get("bars", []))
+        state["fired"] = state["fired"][-500:]
+        icon = "🟢" if long_ else "🔴"
+        lvl_name = "PDL" if long_ else "PDH"
+        ext_name = "дно" if long_ else "вершина"
+        since = pd.Timestamp(a["since"]).tz_convert(LOCAL_TZ)
+        caption = (
+            f"⚡ <b>Можливий розворот</b> · {icon} <b>{side} · {sym}</b>\n"
+            f"Свіп {lvl_name} {fmt(a['lvl'])}: {ext_name} {fmt(a['ext'])}, WT вийшов {'з дна' if long_ else 'з вершини'} "
+            f"о {since:%H:%M} ({', '.join(a['tfs'])})\n"
+            f"Ціна повернулась {'вище' if long_ else 'нижче'} {lvl_name} ✅\n"
+            f"Ранковий контекст: {BIAS_ICON[c['bias']]} {c['bias']} — {c['note']} (сигнал проти нього)\n"
+            f"Ціна: {fmt(price)} · {datetime.now(LOCAL_TZ):%H:%M}" + (f"\nДані: {c['src']}" if c.get("src") else "")
+        )
+        png = chart(m1, f"{sym} · M1 · {side} · розворот?", c["pdh"], c["pdl"], mark=side)
+        send_photo(png, caption)
 
 
 def send_signal(sym, c, hits, side, kind):
@@ -822,11 +899,10 @@ def send_signal(sym, c, hits, side, kind):
     lvl_name, lvl = ("PDL", c["pdl"]) if long_ else ("PDH", c["pdh"])
     swept_any = any(h[7] for h in hits)
     if kind == "rev":
-        back = (price > lvl) if long_ else (price < lvl)
         head = f"⚡ <b>Можливий розворот</b> · {icon} <b>{side} · {sym} · {tfs}</b>\n"
         sweep = (f"Свіп {lvl_name} {fmt(lvl)}: {ext_name} {fmt(min(h[6] for h in hits) if long_ else max(h[6] for h in hits))}"
                  f" {'нижче' if long_ else 'вище'} {lvl_name}, WT {where}\n"
-                 f"Ціна {'вже повернулась ' + ('вище' if long_ else 'нижче') + ' ' + lvl_name + ' ✅' if back else 'ще ' + ('під' if long_ else 'над') + ' ' + lvl_name + ' — чекаємо закріп'}\n")
+                 f"Ціна повернулась {'вище' if long_ else 'нижче'} {lvl_name} ✅\n")
         ctx_line = f"Ранковий контекст: {BIAS_ICON[c['bias']]} {c['bias']} — {c['note']} (сигнал проти нього)\n"
         caption = head + sweep + wts + "\n" + ctx_line
     else:
