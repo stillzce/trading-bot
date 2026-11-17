@@ -62,7 +62,8 @@ WORK_END = env("WORK_END", "23:00")
 RUN_MINUTES = int(env("RUN_MINUTES", "310"))      # скільки максимум живе один запуск (ліміт GitHub — 6 год)
 SESSION_TZ = ZoneInfo(env("SESSION_TZ", "America/New_York"))
 SESSION_CLOSE_HOUR = int(env("SESSION_CLOSE_HOUR", "17"))  # денна свічка закривається о 17:00 NY
-CONTEXT_MAX_BACK = int(env("CONTEXT_MAX_BACK", "5"))       # скільки днів назад шукати не-нейтральний контекст
+CONTEXT_MAX_BACK = int(env("CONTEXT_MAX_BACK", "5"))
+REVERSAL_ALERTS = env("REVERSAL_ALERTS", "1") == "1"   # ⚡ сигнал «можливий розворот» від свіпу PDL/PDH
 DRY_RUN = env("DRY_RUN", "0") == "1"
 STATE_FILE = Path(env("STATE_FILE", "state/state.json"))
 
@@ -570,6 +571,18 @@ def wt_extreme_cross(wt1, wt2, i):
     return None
 
 
+def swept_today(df, wt1, i, side, level, sess_start, max_back=200):
+    """Чи дно (вершина) поточної зони WT пробило PDL (PDH) саме сьогодні."""
+    j = i - 1
+    while j > 0 and i - j < max_back and ((wt1.iloc[j] <= WT_OS) if side == "LONG" else (wt1.iloc[j] >= WT_OB)):
+        j -= 1
+    seg = df.iloc[j + 1: i + 1]
+    seg = seg[seg.index >= sess_start]
+    if seg.empty:
+        return False
+    return bool(seg["low"].min() < level) if side == "LONG" else bool(seg["high"].max() > level)
+
+
 def zone_extreme(df, wt1, i, side, max_back=200):
     """Дно/вершина: мінімум (максимум) свічок, поки WT був у зоні перед сигналом, + свічка сигналу."""
     j = i - 1
@@ -753,7 +766,7 @@ def check_cycle(cache, ctx, state, first=False):
     minute_idx = int(now.timestamp() // 60)
     sent = state.setdefault("sent", [])
     for sym, c in ctx.items():
-        hits = []  # (tf, side, df, wt1, wt2, i)
+        hits = {"ctx": [], "rev": []}  # за контекстом / можливий розворот від свіпу PDL/PDH
         min_tf = cache.src.min_tf(sym) if hasattr(cache.src, "min_tf") else 1
         for tf in SIGNAL_TFS:
             if not due(tf, minute_idx, first) or TF_MIN[tf] < min_tf:
@@ -768,39 +781,62 @@ def check_cycle(cache, ctx, state, first=False):
                     if now - (df.index[i] + dur) > dur * 2 + pd.Timedelta(minutes=10):
                         continue  # стара свічка
                     side = wt_extreme_cross(wt1, wt2, i)
-                    if not side or not ((side == "LONG" and c["bias"] == "BULL") or
-                                        (side == "SHORT" and c["bias"] == "BEAR")):
+                    if not side:
+                        continue
+                    ext = zone_extreme(df, wt1, i, side)
+                    with_bias = (side == "LONG" and c["bias"] == "BULL") or (side == "SHORT" and c["bias"] == "BEAR")
+                    # свіп: дно сформувалось нижче PDL (вершина — вище PDH)
+                    sess_start = c["days"].index[-1] + pd.Timedelta(hours=24)
+                    swept = tf != "1D" and swept_today(df, wt1, i, side, c["pdl"] if side == "LONG" else c["pdh"], sess_start)
+                    if with_bias:
+                        kind = "ctx"
+                    elif swept and REVERSAL_ALERTS and tf != "1D":
+                        kind = "rev"
+                    else:
                         continue
                     key = f"{sym}|{tf}|{int(df.index[i].timestamp())}|{side}"
                     if key in sent:
                         continue
                     sent.append(key)
-                    hits.append((tf, side, df, wt1, wt2, i))
+                    hits[kind].append((tf, side, df, wt1, wt2, i, ext, swept))
             except Exception as e:
                 print(f"{sym} {tf}: помилка: {e}")
-        if not hits:
-            continue
-        # кілька таймфреймів одночасно → одне повідомлення, графік зі старшого
-        side = hits[0][1]
-        hits.sort(key=lambda h: TF_MIN[h[0]])
-        tf_top, _, df_top, _, _, i_top = hits[-1]
-        icon = "🟢" if side == "LONG" else "🔴"
-        where = f"вийшов з дна (перетнув {WT_OS:.0f} вгору)" if side == "LONG" else f"вийшов з вершини (перетнув {WT_OB:.0f} вниз)"
-        tfs = ", ".join(TF_LABEL[h[0]] for h in hits)
-        ext_name = "дно" if side == "LONG" else "вершина"
-        wts = "\n".join(f"   {TF_LABEL[h[0]]}: WT {h[3].iloc[h[5]]:.0f} · {ext_name} {fmt(zone_extreme(h[2], h[3], h[5], side))}"
-                        for h in hits)
-        price = df_top["close"].iloc[i_top]
-        caption = (
-            f"{icon} <b>{side} · {sym} · {tfs}</b>\n"
-            f"WT {where}:\n{wts}\n"
-            f"Контекст дня: {BIAS_ICON[c['bias']]} {c['bias']} — {c['note']}\n"
-            f"Ціна: {fmt(price)} · {datetime.now(LOCAL_TZ):%H:%M}"
-            + (f"\nДані: {c['src']}" if c.get("src") else "")
-        )
-        png = chart(df_top.iloc[: i_top + 1], f"{sym} · {TF_LABEL[tf_top]} · {side}", c["pdh"], c["pdl"],
-                    mark=side, daily=tf_top == "1D")
-        send_photo(png, caption)
+        for kind, hh in hits.items():
+            for side in ("LONG", "SHORT"):
+                group = [h for h in hh if h[1] == side]
+                if group:
+                    send_signal(sym, c, group, side, kind)
+
+
+def send_signal(sym, c, hits, side, kind):
+    """Одне повідомлення на інструмент/напрямок; графік зі старшого ТФ."""
+    hits.sort(key=lambda h: TF_MIN[h[0]])
+    tf_top, _, df_top, _, _, i_top, ext_top, _ = hits[-1]
+    icon = "🟢" if side == "LONG" else "🔴"
+    long_ = side == "LONG"
+    where = f"вийшов з дна (перетнув {WT_OS:.0f} вгору)" if long_ else f"вийшов з вершини (перетнув {WT_OB:.0f} вниз)"
+    tfs = ", ".join(TF_LABEL[h[0]] for h in hits)
+    ext_name = "дно" if long_ else "вершина"
+    wts = "\n".join(f"   {TF_LABEL[h[0]]}: WT {h[3].iloc[h[5]]:.0f} · {ext_name} {fmt(h[6])}" for h in hits)
+    price = df_top["close"].iloc[i_top]
+    lvl_name, lvl = ("PDL", c["pdl"]) if long_ else ("PDH", c["pdh"])
+    swept_any = any(h[7] for h in hits)
+    if kind == "rev":
+        back = (price > lvl) if long_ else (price < lvl)
+        head = f"⚡ <b>Можливий розворот</b> · {icon} <b>{side} · {sym} · {tfs}</b>\n"
+        sweep = (f"Свіп {lvl_name} {fmt(lvl)}: {ext_name} {fmt(min(h[6] for h in hits) if long_ else max(h[6] for h in hits))}"
+                 f" {'нижче' if long_ else 'вище'} {lvl_name}, WT {where}\n"
+                 f"Ціна {'вже повернулась ' + ('вище' if long_ else 'нижче') + ' ' + lvl_name + ' ✅' if back else 'ще ' + ('під' if long_ else 'над') + ' ' + lvl_name + ' — чекаємо закріп'}\n")
+        ctx_line = f"Ранковий контекст: {BIAS_ICON[c['bias']]} {c['bias']} — {c['note']} (сигнал проти нього)\n"
+        caption = head + sweep + wts + "\n" + ctx_line
+    else:
+        caption = (f"{icon} <b>{side} · {sym} · {tfs}</b>\nWT {where}:\n{wts}\n"
+                   + (f"✅ {ext_name.capitalize()} {'зняло' if long_ else 'зняла'} {lvl_name} {fmt(lvl)} (свіп)\n" if swept_any else "")
+                   + f"Контекст дня: {BIAS_ICON[c['bias']]} {c['bias']} — {c['note']}\n")
+    caption += f"Ціна: {fmt(price)} · {datetime.now(LOCAL_TZ):%H:%M}" + (f"\nДані: {c['src']}" if c.get("src") else "")
+    png = chart(df_top.iloc[: i_top + 1], f"{sym} · {TF_LABEL[tf_top]} · {side}" + (" · розворот?" if kind == "rev" else ""),
+                c["pdh"], c["pdl"], mark=side, daily=tf_top == "1D")
+    send_photo(png, caption)
 
 
 def local_dt(hhmm, base):
