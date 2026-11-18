@@ -1146,17 +1146,27 @@ def run_stats(src):
 
 def run_diag(src, arg):
     """Діагностика: останні свічки й значення WT (у Telegram нічого не шле). diag:NAS100:1m або diag:NAS100:1m,5m,15m"""
-    sym, _, tfs = arg.partition(":")
-    for tf in (tfs or "1m").split(","):
+    parts = arg.split(":")
+    sym, tfs = parts[0], (parts[1] if len(parts) > 1 else "1m")
+    win = ":".join(parts[2:]) if len(parts) > 2 else ""  # напр. 09.20-12.30 (час Київ, сьогодні)
+    for tf in tfs.split(","):
         print(f"===== {sym} {tf}")
-        _diag_one(src, sym, tf)
+        _diag_one(src, sym, tf, win)
 
 
-def _diag_one(src, sym, tf):
+def _diag_one(src, sym, tf, win=""):
     df = closed_only(src.bars(sym.upper(), tf, pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=FIRST_FETCH_DAYS.get(tf, 5))), tf)
     w1, w2 = wavetrend(df)
     dur = pd.Timedelta(minutes=TF_MIN[tf])
-    for i in range(max(1, len(df) - 90), len(df)):
+    rng = range(max(1, len(df) - 90), len(df))
+    if win:
+        a, b = win.split("-")
+        day = datetime.now(LOCAL_TZ).date()
+        mk = lambda x: pd.Timestamp(datetime.combine(day, datetime.strptime(x, "%H.%M").time()), tz=LOCAL_TZ)
+        t0, t1 = mk(a), mk(b)
+        closes = (df.index + dur).tz_convert(LOCAL_TZ)
+        rng = [i for i in range(1, len(df)) if t0 <= closes[i] <= t1]
+    for i in rng:
         mark = wt_extreme_cross(w1, w2, i) or ""
         r = df.iloc[i]
         print(f"{(df.index[i] + dur).tz_convert(LOCAL_TZ):%d.%m %H:%M} close {fmt(r.close)} H {fmt(r.high)} L {fmt(r.low)} WT {w1.iloc[i]:7.1f} {mark}")
