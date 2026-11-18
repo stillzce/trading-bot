@@ -513,7 +513,13 @@ def bias_of(y, p):
     if y.close < p.low:
         return "BEAR", "закрилась нижче PDL"
     if took_high and took_low:
-        return "NEUTRAL", "outside-день, закрилась всередині"
+        # зняла обидва боки: вирішує, де закрилась — бичача свічка у верхній половині діапазону = лонг
+        mid = (y.high + y.low) / 2
+        if y.close > y.open and y.close > mid:
+            return "BULL", "outside-день: зняла PDH і PDL, закрилась угорі (бичача)"
+        if y.close < y.open and y.close < mid:
+            return "BEAR", "outside-день: зняла PDH і PDL, закрилась унизу (ведмежа)"
+        return "NEUTRAL", "outside-день, закрилась посередині"
     if took_high:
         return "BEAR", "зняла PDH і повернулась"
     if took_low:
