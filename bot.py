@@ -766,6 +766,7 @@ def check_cycle(cache, ctx, state, first=False):
     minute_idx = int(now.timestamp() // 60)
     sent = state.setdefault("sent", [])
     for sym, c in ctx.items():
+        check_context_break(cache, sym, c, state)
         hits = {"ctx": [], "rev": []}  # за контекстом / можливий розворот від свіпу PDL/PDH
         min_tf = cache.src.min_tf(sym) if hasattr(cache.src, "min_tf") else 1
         for tf in SIGNAL_TFS:
@@ -813,7 +814,7 @@ def check_cycle(cache, ctx, state, first=False):
             for side in ("LONG", "SHORT"):
                 group = [h for h in hh if h[1] == side]
                 if group:
-                    send_signal(sym, c, group, side, kind)
+                    send_signal(sym, c, group, side, kind, cache, state)
                     if kind == "rev":
                         state.get("armed", {}).pop(f"{sym}|{side}", None)
         check_armed(cache, sym, c, state)
@@ -885,7 +886,90 @@ def check_armed(cache, sym, c, state):
         send_photo(png, caption)
 
 
-def send_signal(sym, c, hits, side, kind):
+TF_CHAIN = ["1m", "5m", "15m", "30m", "1H", "4H"]
+
+
+def check_context_break(cache, sym, c, state):
+    """Контекст зламано, якщо свічка H1 сьогодні закрилась за рівнем, на якому він тримається:
+    BULL — нижче PDL, BEAR — вище PDH. Повідомляємо один раз за день."""
+    if c["bias"] == "NEUTRAL":
+        return
+    today = datetime.now(LOCAL_TZ).strftime("%Y-%m-%d")
+    br = state.setdefault("broken", {})
+    if br.get(sym) == today:
+        c["broken"] = True
+        return
+    try:
+        h1 = cache.get(sym, "1H")
+    except Exception as e:
+        print(f"{sym}: context break check: {e}")
+        return
+    sess_start = c["days"].index[-1] + pd.Timedelta(hours=24)
+    h1 = h1[h1.index >= sess_start]
+    if h1.empty:
+        return
+    bull = c["bias"] == "BULL"
+    bad = h1[h1["close"] < c["pdl"]] if bull else h1[h1["close"] > c["pdh"]]
+    if bad.empty:
+        return
+    br[sym] = today
+    c["broken"] = True
+    t = (bad.index[0] + pd.Timedelta(hours=1)).tz_convert(LOCAL_TZ)
+    lvl_name, lvl = ("PDL", c["pdl"]) if bull else ("PDH", c["pdh"])
+    send_text(f"⚠️ <b>{sym}: контекст {c['bias']} зламано</b>\n"
+              f"Свічка H1 о {t:%H:%M} закрилась {'нижче' if bull else 'вище'} {lvl_name} {fmt(lvl)} "
+              f"({fmt(bad['close'].iloc[0])}). Сигнали в бік {'лонга' if bull else 'шорта'} далі йдуть з позначкою ⚠️.")
+
+
+def htf_state(cache, sym, tf):
+    """WT старших ТФ: наступний над сигнальним + H1 і H4. Повертає [(tf, wt, зміна)]."""
+    i = TF_CHAIN.index(tf) if tf in TF_CHAIN else len(TF_CHAIN)
+    want = TF_CHAIN[i + 1:i + 2] + [t for t in ("1H", "4H") if t in TF_CHAIN[i + 1:]]
+    out = []
+    for t in dict.fromkeys(want):
+        try:
+            df = cache.get(sym, t)
+            if len(df) < 30:
+                continue
+            w1, _ = wavetrend(df)
+            out.append((t, float(w1.iloc[-1]), float(w1.iloc[-1] - w1.iloc[-2])))
+        except Exception as e:
+            print(f"{sym} {t}: htf: {e}")
+    return out
+
+
+def grade(c, side, htf):
+    """🅰️ / 🅱️ / ⚠️ і пояснення."""
+    long_ = side == "LONG"
+    # старший ТФ «за нас» лише якщо явно розвертається (|Δ| ≥ 1); плоский або проти — рахуємо як проти
+    against = lambda d: d < 1.0 if long_ else d > -1.0
+    if c.get("broken"):
+        return "⚠️", f"Слабкий: контекст зламано (H1 закрився {'нижче PDL' if long_ else 'вище PDH'})"
+    if not htf:
+        return "🅰️", "Сильний"
+    nxt = htf[0]
+    big = [h for h in htf if h[0] in ("1H", "4H")]
+    big_against = bool(big) and all(against(h[2]) for h in big)
+    if against(nxt[2]) and big_against:
+        return "⚠️", "Слабкий: старші ТФ ідуть проти (" + ", ".join(TF_LABEL[h[0]] for h in htf) + ")"
+    if against(nxt[2]) or big_against:
+        who = TF_LABEL[nxt[0]] if against(nxt[2]) else "H1/H4"
+        return "🅱️", f"Середній: {who} ще йде проти"
+    return "🅰️", "Сильний: старші ТФ не проти"
+
+
+def htf_line(htf):
+    if not htf:
+        return ""
+    parts = []
+    for t, v, d in htf:
+        zone = " зона" if (v <= WT_OS or v >= WT_OB) else ""
+        arrow = "↑" if d >= 1 else "↓" if d <= -1 else "→"
+        parts.append(f"{TF_LABEL[t]} {v:.0f}{arrow}{zone}")
+    return "Старші ТФ: " + " · ".join(parts) + "\n"
+
+
+def send_signal(sym, c, hits, side, kind, cache=None, state=None):
     """Одне повідомлення на інструмент/напрямок; графік зі старшого ТФ."""
     hits.sort(key=lambda h: TF_MIN[h[0]])
     tf_top, _, df_top, _, _, i_top, ext_top, _ = hits[-1]
@@ -898,15 +982,20 @@ def send_signal(sym, c, hits, side, kind):
     price = df_top["close"].iloc[i_top]
     lvl_name, lvl = ("PDL", c["pdl"]) if long_ else ("PDH", c["pdh"])
     swept_any = any(h[7] for h in hits)
+    htf = htf_state(cache, sym, tf_top) if cache is not None else []
+    g_icon, g_text = grade(c, side, htf) if kind == "ctx" else ("", "")
+    hline = htf_line(htf)
     if kind == "rev":
         head = f"⚡ <b>Можливий розворот</b> · {icon} <b>{side} · {sym} · {tfs}</b>\n"
         sweep = (f"Свіп {lvl_name} {fmt(lvl)}: {ext_name} {fmt(min(h[6] for h in hits) if long_ else max(h[6] for h in hits))}"
                  f" {'нижче' if long_ else 'вище'} {lvl_name}, WT {where}\n"
-                 f"Ціна повернулась {'вище' if long_ else 'нижче'} {lvl_name} ✅\n")
+                 f"Ціна повернулась {'вище' if long_ else 'нижче'} {lvl_name} ✅\n" + hline)
         ctx_line = f"Ранковий контекст: {BIAS_ICON[c['bias']]} {c['bias']} — {c['note']} (сигнал проти нього)\n"
         caption = head + sweep + wts + "\n" + ctx_line
     else:
-        caption = (f"{icon} <b>{side} · {sym} · {tfs}</b>\nWT {where}:\n{wts}\n"
+        caption = (f"{g_icon} <b>{g_text}</b>\n"
+                   f"{icon} <b>{side} · {sym} · {tfs}</b>\nWT {where}:\n{wts}\n"
+                   + hline
                    + (f"✅ {ext_name.capitalize()} {'зняло' if long_ else 'зняла'} {lvl_name} {fmt(lvl)} (свіп)\n" if swept_any else "")
                    + f"Контекст дня: {BIAS_ICON[c['bias']]} {c['bias']} — {c['note']}\n")
     caption += f"Ціна: {fmt(price)} · {datetime.now(LOCAL_TZ):%H:%M}" + (f"\nДані: {c['src']}" if c.get("src") else "")
