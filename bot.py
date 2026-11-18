@@ -1069,7 +1069,8 @@ def _diag_one(src, sym, tf):
     dur = pd.Timedelta(minutes=TF_MIN[tf])
     for i in range(max(1, len(df) - 90), len(df)):
         mark = wt_extreme_cross(w1, w2, i) or ""
-        print(f"{(df.index[i] + dur).tz_convert(LOCAL_TZ):%H:%M} close {df['close'].iloc[i]:.2f} WT {w1.iloc[i]:7.1f} {mark}")
+        r = df.iloc[i]
+        print(f"{(df.index[i] + dur).tz_convert(LOCAL_TZ):%d.%m %H:%M} close {fmt(r.close)} H {fmt(r.high)} L {fmt(r.low)} WT {w1.iloc[i]:7.1f} {mark}")
 
 
 def main():
