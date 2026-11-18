@@ -282,7 +282,7 @@ class OkxSource:
 
     BASE = "https://www.okx.com/api/v5"
     CANDIDATES = {"XAUUSD": ["XAU-USDT-SWAP", "XAUT-USDT-SWAP", "XAUT-USDT"],
-                  "US500": ["US500-USDT-SWAP"], "SPX500": ["US500-USDT-SWAP"],
+                  "US500": ["SPY-USDT-SWAP"], "SPX500": ["SPY-USDT-SWAP"],  # US500-USDT-SWAP неліквідний
                   "NAS100": ["QQQ-USDT-SWAP"], "NDX100": ["QQQ-USDT-SWAP"]}
     BAR = {"1m": "1m", "5m": "5m", "15m": "15m", "30m": "30m", "1H": "1H", "4H": "4H"}
 
@@ -306,7 +306,8 @@ class OkxSource:
 
     def label(self, symbol):
         inst = self.ids.get(symbol.upper(), symbol.upper())
-        return f"OKX {inst}" + (" (ETF QQQ, інший масштаб ціни)" if inst.startswith("QQQ") else "")
+        etf = "QQQ" if inst.startswith("QQQ") else "SPY" if inst.startswith("SPY") else ""
+        return f"OKX {inst}" + (f" (ETF {etf}, інший масштаб ціни)" if etf else "")
 
     def bars(self, symbol, resolution, frm, to=None):
         inst, bar = self.ids.get(symbol.upper(), symbol.upper()), self.BAR[resolution]
@@ -922,9 +923,9 @@ def check_context_break(cache, sym, c, state):
 
 
 def htf_state(cache, sym, tf):
-    """WT старших ТФ: наступний над сигнальним + H1 і H4. Повертає [(tf, wt, зміна)]."""
+    """WT старших ТФ: наступний над сигнальним + M15, H1, H4. Повертає [(tf, wt, зміна)]."""
     i = TF_CHAIN.index(tf) if tf in TF_CHAIN else len(TF_CHAIN)
-    want = TF_CHAIN[i + 1:i + 2] + [t for t in ("1H", "4H") if t in TF_CHAIN[i + 1:]]
+    want = TF_CHAIN[i + 1:i + 2] + [t for t in ("15m", "1H", "4H") if t in TF_CHAIN[i + 1:]]
     out = []
     for t in dict.fromkeys(want):
         try:
@@ -938,24 +939,29 @@ def htf_state(cache, sym, tf):
     return out
 
 
-def grade(c, side, htf):
-    """🅰️ / 🅱️ / ⚠️ і пояснення."""
+def grade(c, side, htf, sig_tf="1m"):
+    """🅰️ / 🅱️ / ⚠️ і пояснення.
+    🅰️ — дно/вершина є на M15 або старшому ТФ (WT біля зони: ≤ −50 для лонга, ≥ 50 для шорта);
+    ⚠️ — контекст зламано або старші ТФ ідуть проти і біля зони немає жодного;
+    🅱️ — решта (розворот лише на молодших ТФ)."""
     long_ = side == "LONG"
-    # старший ТФ «за нас» лише якщо явно розвертається (|Δ| ≥ 1); плоский або проти — рахуємо як проти
-    against = lambda d: d < 1.0 if long_ else d > -1.0
     if c.get("broken"):
         return "⚠️", f"Слабкий: контекст зламано (H1 закрився {'нижче PDL' if long_ else 'вище PDH'})"
+    near = lambda v: v <= -50 if long_ else v >= 50
+    # старший ТФ «за нас» лише якщо явно розвертається (|Δ| ≥ 1); плоский або проти — рахуємо як проти
+    against = lambda d: d < 1.0 if long_ else d > -1.0
+    deep = [h for h in htf if TF_MIN[h[0]] >= 15 and near(h[1])]
+    if TF_MIN.get(sig_tf, 1) >= 15 or deep:
+        top = TF_LABEL[deep[-1][0]] if deep else TF_LABEL[sig_tf]
+        return "🅰️", f"Сильний: {'дно' if long_ else 'вершина'} на {top}"
     if not htf:
-        return "🅰️", "Сильний"
+        return "🅱️", "Середній"
     nxt = htf[0]
     big = [h for h in htf if h[0] in ("1H", "4H")]
     big_against = bool(big) and all(against(h[2]) for h in big)
-    if against(nxt[2]) and big_against:
-        return "⚠️", "Слабкий: старші ТФ ідуть проти (" + ", ".join(TF_LABEL[h[0]] for h in htf) + ")"
-    if against(nxt[2]) or big_against:
-        who = TF_LABEL[nxt[0]] if against(nxt[2]) else "H1/H4"
-        return "🅱️", f"Середній: {who} ще йде проти"
-    return "🅰️", "Сильний: старші ТФ не проти"
+    if against(nxt[2]) and big_against and not near(nxt[1]):
+        return "⚠️", "Слабкий: старші ТФ ідуть проти, біля зони — лише " + TF_LABEL[sig_tf]
+    return "🅱️", f"Середній: {'дно' if long_ else 'вершина'} лише на молодших ТФ"
 
 
 def htf_line(htf):
@@ -983,7 +989,7 @@ def send_signal(sym, c, hits, side, kind, cache=None, state=None):
     lvl_name, lvl = ("PDL", c["pdl"]) if long_ else ("PDH", c["pdh"])
     swept_any = any(h[7] for h in hits)
     htf = htf_state(cache, sym, tf_top) if cache is not None else []
-    g_icon, g_text = grade(c, side, htf) if kind == "ctx" else ("", "")
+    g_icon, g_text = grade(c, side, htf, tf_top) if kind == "ctx" else ("", "")
     hline = htf_line(htf)
     if kind == "rev":
         head = f"⚡ <b>Можливий розворот</b> · {icon} <b>{side} · {sym} · {tfs}</b>\n"
