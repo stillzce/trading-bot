@@ -302,14 +302,14 @@ class OkxSource:
         self.extra = sorted(i for i in live if any(k in i for k in ("SPY", "QQQ", "SPX", "NAS", "NDX", "US500")))
 
     def has(self, symbol):
-        return symbol.upper() in self.ids
+        return symbol.upper() in self.ids or "-USDT" in symbol.upper()
 
     def label(self, symbol):
-        inst = self.ids[symbol.upper()]
+        inst = self.ids.get(symbol.upper(), symbol.upper())
         return f"OKX {inst}" + (" (ETF QQQ, інший масштаб ціни)" if inst.startswith("QQQ") else "")
 
     def bars(self, symbol, resolution, frm, to=None):
-        inst, bar = self.ids[symbol.upper()], self.BAR[resolution]
+        inst, bar = self.ids.get(symbol.upper(), symbol.upper()), self.BAR[resolution]
         frm_ms = int(frm.timestamp() * 1000)
         rows, after = [], None
         for _ in range(400):  # пагінація назад у часі по 100 свічок
