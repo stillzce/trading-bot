@@ -1569,7 +1569,9 @@ def main():
             os.environ["BT_DAYS"] = arg
         import bt3
         bt3.run(src)
-    elif mode == "bt4":
+    elif mode in ("bt4", "bt5"):
+        if mode == "bt5":
+            os.environ["BT5"] = "1"
         import bt4
         bt4.run(src)
     elif mode == "replay":

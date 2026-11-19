@@ -186,11 +186,14 @@ def run(src):
             k = np.searchsorted(CL["1H"], t, side="right") - 1
             return atrh[k] if k >= 14 else np.nan
 
+        s_pdh = sess["pdh"].to_numpy()
+        s_pdl = sess["pdl"].to_numpy()
         for tf in TFS:
             if tf not in W or EXIT[tf] not in OPP:
                 continue
             d = data[tf]
             h, l, c = d["high"].to_numpy(), d["low"].to_numpy(), d["close"].to_numpy()
+            atr_tf = (d["high"] - d["low"]).rolling(14).mean().to_numpy()
             cl = CL[tf]
             w1, w2 = W[tf]
             xtf = EXIT[tf]
@@ -293,12 +296,24 @@ def run(src):
                             r = sg * (c[jend] - entry) / R
                         out[ex] = round(r - cst / R, 3)
                     res[kk] = (round(R / atr, 3), out["E1"], out["E4"])
+                # зміна контексту всередині дня: свіп рівня проти контексту й повернення за нього
+                j0 = int(np.searchsorted(cl, s_start[k], side="right"))
+                if long_:
+                    flip = bool(l[j0:i + 1].min() < s_pdl[k] and entry > s_pdl[k]) if j0 <= i else False
+                else:
+                    flip = bool(h[j0:i + 1].max() > s_pdh[k] and entry < s_pdh[k]) if j0 <= i else False
+                at = atr_tf[i]
                 rows.append((sym, tf, etype, side, ctx, loc.strftime("%Y-%m-%d %H:%M"),
                              round(dA / atr, 3) if np.isfinite(dA) else 99.0,
-                             round(dB / atr, 3) if np.isfinite(dB) else 99.0, res))
+                             round(dB / atr, 3) if np.isfinite(dB) else 99.0, res,
+                             round(dB / at, 3) if np.isfinite(dB) and at > 0 else 99.0, flip,
+                             float(entry)))
         print(f"{sym} ({meta[sym]['src']}): записів {sum(1 for r in rows if r[0] == sym)} · {time.time() - t0:.0f} c")
     print("META", json.dumps(meta, ensure_ascii=False))
-    report(rows)
+    if os.environ.get("BT5"):
+        report5(rows)
+    else:
+        report(rows)
 
 
 def stats(a):
@@ -354,3 +369,75 @@ def report(rows):
                         by["Rsize"][str(min(4, int(r[8][kk][0] * 2) / 2))].append(v)
                     out = {g: {k: stats(v) for k, v in d.items()} for g, d in by.items()}
                     print("BY", json.dumps({"cfg": [et, kk, wn, cn, "E1"], **out}, ensure_ascii=False))
+
+
+def stats5(a, days=None):
+    a = np.asarray(a, float)
+    if not len(a):
+        return None
+    w, ls = a[a > 0], a[a <= 0]
+    eq = np.r_[0, np.cumsum(a)]
+    return {"n": len(a), "win%": round(float(len(w) / len(a) * 100)), "sumR": round(float(a.sum()), 1),
+            "PF": round(float(w.sum() / -ls.sum()), 2) if ls.sum() < 0 else None,
+            "avgWin": round(float(w.mean()), 2) if len(w) else 0, "avgLoss": round(float(ls.mean()), 2) if len(ls) else 0,
+            "RR": round(float(w.mean() / -ls.mean()), 2) if len(w) and len(ls) and ls.mean() < 0 else None,
+            "avgR": round(float(a.mean()), 3), "DD": round(float((np.maximum.accumulate(eq) - eq).max()), 1),
+            "perDay": round(len(a) / days, 2) if days else None}
+
+
+def report5(rows):
+    rows.sort(key=lambda r: r[5])
+    K = 0.0
+    R = [r for r in rows if r[8].get(K)]
+    E = lambda r, ex=1: r[8][K][ex]
+    def out(tag, sel, ex=1, days=None):
+        st = stats5([E(r, ex) for r in sel], days)
+        if st:
+            print("R5", json.dumps({"tag": tag, **st}, ensure_ascii=False))
+    # 1) ATR M15 проти ATR ТФ сигналу; «немає FVG»
+    for grp, f in (("WT|with", lambda r: r[2] == "WT" and r[4] == "with"),
+                   ("WT|against", lambda r: r[2] == "WT" and r[4] == "against"),
+                   ("FVG|with", lambda r: r[2] == "FVG" and r[4] == "with"),
+                   ("FVG|against", lambda r: r[2] == "FVG" and r[4] == "against")):
+        sel = [r for r in R if f(r)]
+        out(f"{grp}|none", sel)
+        for th in (0.5, 1, 1.5, 2, 3):
+            out(f"{grp}|M15ATR>={th}", [r for r in sel if r[7] >= th])
+            out(f"{grp}|tfATR>={th}", [r for r in sel if r[9] >= th])
+        out(f"{grp}|noFVG", [r for r in sel if r[7] >= 98])
+        out(f"{grp}|hasFVG_far>=1.5", [r for r in sel if 1.5 <= r[7] < 98])
+    # 2) зміна контексту всередині дня
+    for et in ("WT", "FVG"):
+        sel = [r for r in R if r[2] == et and r[4] == "against"]
+        out(f"{et}|against|flip", [r for r in sel if r[10]])
+        out(f"{et}|against|noflip", [r for r in sel if not r[10]])
+        out(f"{et}|against|flip+B1.5", [r for r in sel if r[10] and r[7] >= 1.5])
+        out(f"{et}|against|flip+tfB2", [r for r in sel if r[10] and r[9] >= 2])
+    # 3) фінальні набори
+    recent = [r for r in R if r[5] >= "2026-10-22"]
+    days = len({r[5][:10] for r in recent}) or 1
+    finals = {
+        "A: WT у бік, усі ТФ": lambda r: r[2] == "WT" and r[4] == "with",
+        "B: A + FVG проти з чистим шляхом B1.5": lambda r: (r[2] == "WT" and r[4] == "with") or
+            (r[2] == "FVG" and r[4] == "against" and r[7] >= 1.5),
+        "C: B, лише 30m/1H/2H": lambda r: r[1] in ("30m", "1H", "2H") and ((r[2] == "WT" and r[4] == "with") or
+            (r[2] == "FVG" and r[4] == "against" and r[7] >= 1.5)),
+        "D: B без M5/M15": lambda r: r[1] not in ("5m", "15m") and ((r[2] == "WT" and r[4] == "with") or
+            (r[2] == "FVG" and r[4] == "against" and r[7] >= 1.5)),
+        "E: WT у бік з чистим шляхом B1 + FVG проти B1.5": lambda r: (r[2] == "WT" and r[4] == "with" and r[7] >= 1) or
+            (r[2] == "FVG" and r[4] == "against" and r[7] >= 1.5),
+    }
+    for name, f in finals.items():
+        sel = [r for r in R if f(r)]
+        out(f"FINAL|{name}|all", sel)
+        out(f"FINAL|{name}|recent4w", [r for r in recent if f(r)], days=days)
+        out(f"FINAL|{name}|E4", sel, ex=2)
+        for tf in TFS:
+            out(f"FINAL|{name}|tf={tf}", [r for r in sel if r[1] == tf])
+        h = len(sel) // 2
+        out(f"FINAL|{name}|half1", sel[:h])
+        out(f"FINAL|{name}|half2", sel[h:])
+    # 4) цей тиждень
+    for r in R:
+        if r[5] >= "2026-11-16":
+            print("WEEK", json.dumps([r[0], r[1], r[2], r[3], r[4], r[5], r[7], r[9], r[10], r[11], E(r), E(r, 2)], ensure_ascii=False))
