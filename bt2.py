@@ -244,9 +244,9 @@ def run(src):
     rep = {}
     mid = str((now - pd.Timedelta(days=DAYS / 2)).tz_convert(bot.LOCAL_TZ))
     for sv in ("zone", "atr1.5"):
-        for name, f in list(filters.items()) + [("пауза після 2 стопів", None), ("ост. закріп M15/H1 не проти + пауза", "combo")]:
+        for name, f in list(filters.items()) + [("пауза після 2 стопів", None), ("без стіни + пауза", "combo")]:
             if f == "combo":
-                tt = mark_pause([x for x in trades if x["stopv"] == sv and not (x["fl15"] or x["fl1h"])])
+                tt = mark_pause([x for x in trades if x["stopv"] == sv and not (x["fw15"] or x["fw1h"])])
             else:
                 tt = [x for x in trades if x["stopv"] == sv and (f is None or f(x))]
             if f is None:
