@@ -1569,6 +1569,9 @@ def main():
             os.environ["BT_DAYS"] = arg
         import bt3
         bt3.run(src)
+    elif mode == "bt4":
+        import bt4
+        bt4.run(src)
     elif mode == "replay":
         import replay
         replay.run(src, arg or "08.00-10.00")
