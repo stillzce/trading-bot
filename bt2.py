@@ -25,6 +25,64 @@ def htf_at(df, w1, times):
     return v, d
 
 
+def fvg_list(df, tf):
+    """FVG на ТФ: (напрям, низ, верх, час появи, час закріпу проти, час повного заповнення).
+    Бичачий: low[i] > high[i-2]. Ведмежий: high[i] < low[i-2]. Закріп проти = тіло закрилось за дальнім краєм."""
+    dur = pd.Timedelta(minutes=bot.TF_MIN[tf])
+    h, l, c = df["high"].to_numpy(), df["low"].to_numpy(), df["close"].to_numpy()
+    closes = (df.index + dur).values
+    out = []
+    for i in range(2, len(df)):
+        if l[i] > h[i - 2]:
+            out.append(["bull", h[i - 2], l[i], closes[i], None, None, i])
+        elif h[i] < l[i - 2]:
+            out.append(["bear", h[i], l[i - 2], closes[i], None, None, i])
+    for f in out:
+        i0 = f[6]
+        for j in range(i0 + 1, len(df)):
+            if f[0] == "bull":
+                if f[5] is None and l[j] <= f[1]:
+                    f[5] = closes[j]
+                if c[j] < f[1]:
+                    f[4] = closes[j]
+                    break
+            else:
+                if f[5] is None and h[j] >= f[2]:
+                    f[5] = closes[j]
+                if c[j] > f[2]:
+                    f[4] = closes[j]
+                    break
+    return out
+
+
+def fvg_flags(fvgs, t, side, entry, atr, look):
+    """Для угоди side у час t:
+    zakrip — за останні look ціна закріпилась за FVG ПРОТИ угоди (для шорта: тіло вище ведмежого FVG);
+    wall   — поруч у бік угоди стоїть незаповнений FVG протилежного напрямку (для шорта: бичачий FVG під ціною
+             в межах 1 ATR M15 або ціна всередині нього)."""
+    t = np.datetime64(t)
+    zak, wall = False, False
+    last_t, last_d = None, None
+    for d, lo, hi, tc, tz, tf_, _ in fvgs:
+        if tc > t:
+            continue
+        if tz is not None and tz <= t and (last_t is None or tz > last_t):
+            last_t, last_d = tz, d
+        if side == "SHORT":
+            if d == "bear" and tz is not None and t - look < tz <= t:
+                zak = True
+            if d == "bull" and (tz is None or tz > t) and (tf_ is None or tf_ > t) and lo < entry and entry - hi <= atr:
+                wall = True
+        else:
+            if d == "bull" and tz is not None and t - look < tz <= t:
+                zak = True
+            if d == "bear" and (tz is None or tz > t) and (tf_ is None or tf_ > t) and hi > entry and lo - entry <= atr:
+                wall = True
+    # last: останній закріп за FVG на цьому ТФ був ПРОТИ угоди (для шорта — тіло вище ведмежого FVG)
+    last = last_d == ("bear" if side == "SHORT" else "bull")
+    return zak, wall, last
+
+
 def opp_times(df, w1, w2, side):
     opp = "SHORT" if side == "LONG" else "LONG"
     dur = pd.Timedelta(minutes=bot.TF_MIN[df.attrs["tf"]])
@@ -55,6 +113,10 @@ def run(src):
         except Exception as e:
             print(f"{sym}: {e}")
             continue
+        fv = {t_: fvg_list(data[t_][0], t_) for t_ in ("15m", "1H")}
+        d15 = data["15m"][0]
+        a15all = (d15["high"] - d15["low"]).rolling(14).mean()
+        c15 = (d15.index + pd.Timedelta(minutes=15)).values
         for tf in ("1m", "5m", "15m"):
             df, w1, w2 = data[tf]
             if len(df) < 200:
@@ -86,7 +148,7 @@ def run(src):
                 ext = bot.zone_extreme(df, w1, i, side)
                 entry = c[i]
                 cst = cost_of(sym, entry)
-                for stopv in ("zone", "atr1", "atr1.5", "atr2"):
+                for stopv in ("zone", "atr1.5"):
                     if stopv == "zone":
                         stop = ext - sg * cst / 2
                     else:  # ширший: не ближче ніж 1.5×ATR(14) M15
@@ -135,8 +197,13 @@ def run(src):
                         r = sg * (c[min(j, len(c) - 1)] - entry) / R
                         res = (half + r) / 2 if half is not None else r
                     v = {tt: (float(feats[tt][0][n]), float(feats[tt][1][n])) for tt in feats}
+                    kq = np.searchsorted(c15, t.to_datetime64(), side="right") - 1
+                    atr15 = float(a15all.iloc[kq]) if kq >= 14 else 0.0
+                    fz15, fw15, fl15 = fvg_flags(fv["15m"], t.to_datetime64(), side, entry, atr15, np.timedelta64(5, "h"))
+                    fz1h, fw1h, fl1h = fvg_flags(fv["1H"], t.to_datetime64(), side, entry, atr15, np.timedelta64(24, "h"))
                     trades.append(dict(sym=sym, tf=tf, side=side, t=str(loc), stopv=stopv,
-                                       R=round(res - cst / R, 3), h1=v["1H"], m15=v["15m"], h4=v["4H"]))
+                                       R=round(res - cst / R, 3), h1=v["1H"], m15=v["15m"], h4=v["4H"],
+                                       fz15=fz15, fw15=fw15, fz1h=fz1h, fw1h=fw1h, fl15=fl15, fl1h=fl1h))
         print(f"{sym}: угод {len([x for x in trades if x['sym'] == sym])}")
 
     def with_us(d, side):
@@ -155,7 +222,15 @@ def run(src):
     filters = {
         "усі (як зараз)": lambda x: True,
         "H1 іде в бік угоди": lambda x: with_us(x["h1"][1], x["side"]),
-        "H1 проти": lambda x: not with_us(x["h1"][1], x["side"]),
+        "без закріпу проти на M15": lambda x: not x["fz15"],
+        "без закріпу проти на H1": lambda x: not x["fz1h"],
+        "без закріпу проти M15 і H1": lambda x: not x["fz15"] and not x["fz1h"],
+        "без FVG-стіни поруч (M15/H1)": lambda x: not x["fw15"] and not x["fw1h"],
+        "без закріпу і без стіни": lambda x: not (x["fz15"] or x["fz1h"] or x["fw15"] or x["fw1h"]),
+        "останній закріп M15 не проти": lambda x: not x["fl15"],
+        "останній закріп H1 не проти": lambda x: not x["fl1h"],
+        "останній закріп M15 і H1 не проти": lambda x: not x["fl15"] and not x["fl1h"],
+        "ост. закріп M15/H1 не проти + без стіни": lambda x: not (x["fl15"] or x["fl1h"] or x["fw15"] or x["fw1h"]),
     }
     def st(rs):
         a = np.array(rs)
@@ -168,9 +243,12 @@ def run(src):
                 "DD": round(float((np.maximum.accumulate(eq) - eq).max()), 1)}
     rep = {}
     mid = str((now - pd.Timedelta(days=DAYS / 2)).tz_convert(bot.LOCAL_TZ))
-    for sv in ("zone", "atr1", "atr1.5", "atr2"):
-        for name, f in list(filters.items()) + [("пауза після 2 стопів", None)]:
-            tt = [x for x in trades if x["stopv"] == sv and (f is None or f(x))]
+    for sv in ("zone", "atr1.5"):
+        for name, f in list(filters.items()) + [("пауза після 2 стопів", None), ("ост. закріп M15/H1 не проти + пауза", "combo")]:
+            if f == "combo":
+                tt = mark_pause([x for x in trades if x["stopv"] == sv and not (x["fl15"] or x["fl1h"])])
+            else:
+                tt = [x for x in trades if x["stopv"] == sv and (f is None or f(x))]
             if f is None:
                 tt = mark_pause(tt)
             rep[f"{sv} | {name}"] = {"all": st([x["R"] for x in tt]),
@@ -179,6 +257,6 @@ def run(src):
                                      "5-15m 2nd": st([x["R"] for x in tt if x["tf"] != "1m" and x["t"] >= mid])}
     for k, v in rep.items():
         print("BT2", k, json.dumps(v, ensure_ascii=False))
-    today = [x for x in trades if x["t"][:10] == str(now.tz_convert(bot.LOCAL_TZ).date()) and x["stopv"] == "zone"]
+    today = [x for x in trades if x["t"][:10] == str(now.tz_convert(bot.LOCAL_TZ).date()) and x["stopv"] == "atr1.5"]
     for x in today:
         print("TODAY", json.dumps(x, ensure_ascii=False))
