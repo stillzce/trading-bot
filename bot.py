@@ -1511,6 +1511,9 @@ def main():
         manage_trades(cache, ctx, state, first=True)
         check_warnings(state)
         send_daily_summary(state)
+    elif mode == "replay":
+        import replay
+        replay.run(src, arg or "08.00-10.00")
     elif mode == "loop":
         run_loop(src)
     else:
