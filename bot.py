@@ -914,7 +914,7 @@ def check_armed(cache, sym, c, state):
             f"{TF_LABEL[conf_tf]} закрилась {'вище' if long_ else 'нижче'} {lvl_name} із запасом ✅ ({fmt(close5)})\n"
             + htf_line(htf) +
             f"Ранковий контекст: {BIAS_ICON[c['bias']]} {c['bias']} — {c['note']} (сигнал проти нього)\n"
-            f"📐 Вхід {fmt(close5)} · Стоп {fmt(stop)} (за {ext_name}) · 1R = {r_txt}\n"
+            f"📐 Вхід {fmt(close5)} · Стоп {fmt(stop)} (за {"дном" if long_ else "вершиною"}) · 1R = {r_txt}\n"
             f"Вихід: ½ — протилежний сигнал {TF_LABEL[conf_tf]}, ½ — протилежний {TF_LABEL[EXIT_TF[conf_tf]]}\n"
             f"Ціна: {fmt(price)} · {datetime.now(LOCAL_TZ):%H:%M}" + (f"\nДані: {c['src']}" if c.get("src") else "")
         )
@@ -1067,7 +1067,7 @@ def send_signal(sym, c, hits, side, kind, cache=None, state=None):
                         f"нову не відкриваю.")
             stop = None
         else:
-            caption += (f"\n📐 Вхід {fmt(price)} · Стоп {fmt(stop)} (за {ext_name}) · 1R = {r_txt}\n"
+            caption += (f"\n📐 Вхід {fmt(price)} · Стоп {fmt(stop)} (за {"дном" if long_ else "вершиною"}) · 1R = {r_txt}\n"
                         f"Вихід: ½ — протилежний сигнал {TF_LABEL[tf_top]}, ½ — протилежний {TF_LABEL[EXIT_TF[tf_top]]}")
     caption += f"\nЦіна: {fmt(price)} · {datetime.now(LOCAL_TZ):%H:%M}" + (f"\nДані: {c['src']}" if c.get("src") else "")
     png = chart(df_top.iloc[: i_top + 1], f"{sym} · {TF_LABEL[tf_top]} · {side}" + (" · розворот?" if kind == "rev" else ""),
