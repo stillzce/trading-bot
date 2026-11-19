@@ -8,7 +8,7 @@ from backtest import session_table
 
 DAYS = int(os.environ.get("BT_DAYS", "45"))
 TF_DAYS = {"1m": 7, "5m": DAYS, "15m": DAYS}
-NEXT = {"1m": "5m", "5m": "15m", "15m": "1H"}
+NEXT = {"1m": "5m", "5m": "15m", "15m": "1H", "1H": "4H"}
 COSTF = {"EURUSD": 0.00012, "GBPUSD": 0.00016, "AUDUSD": 0.00012, "NZDUSD": 0.00016}
 
 
@@ -100,7 +100,7 @@ def run(src):
                 continue
             h1 = bot.closed_only(src.bars(sym, "1H", now - pd.Timedelta(days=DAYS + 40)), "1H")
             sess = session_table(h1)
-            data = {"1H": h1}
+            data = {"1H": h1, "4H": bot.closed_only(src.bars(sym, "4H", now - pd.Timedelta(days=DAYS + 60)), "4H")}
             for tf in ("1m", "5m", "15m"):
                 data[tf] = bot.closed_only(src.bars(sym, tf, now - pd.Timedelta(days=TF_DAYS[tf] + 3)), tf)
         except Exception as e:
@@ -143,11 +143,11 @@ def run(src):
                     return cl[j], float(data[tf]["close"].iloc[j])
             return None
 
-        for tf in ("1m", "5m", "15m"):
+        for tf in ("1m", "5m", "15m", "1H"):
             df = data[tf]
             h, l, c = df["high"].to_numpy(), df["low"].to_numpy(), df["close"].to_numpy()
             cl = CL[tf]
-            since = (now - pd.Timedelta(days=TF_DAYS[tf])).to_datetime64()
+            since = (now - pd.Timedelta(days=TF_DAYS.get(tf, DAYS))).to_datetime64()
             nxt = NEXT[tf]
             for side in ("LONG", "SHORT"):
                 sg = 1 if side == "LONG" else -1
@@ -175,6 +175,7 @@ def run(src):
                         if R < 3 * cst or sg * (entry - stop) <= 0:
                             continue
                         room = room_R([FV[tf], FV["15m"], FV["1H"]], t0, side, entry, R)
+                        wall = (not np.isnan(atr)) and room_R([FV["15m"], FV["1H"]], t0, side, entry, atr) < 1.0
                         horizon = t0 + np.timedelta64(3, "D")
                         res = {}
                         # E1: як у боті зараз (½ на протилежному WT свого ТФ, решта — наступного ТФ, БУ після ½)
@@ -224,7 +225,7 @@ def run(src):
                                 out = (half + r) / 2 if (name == "E1" and half is not None) else r
                             res[name] = round(out - cst / R, 3)
                         trades.append(dict(sym=sym, tf=tf, side=side, t=str(loc)[:16], sv=sv, ctx=ctx,
-                                           room=round(float(room), 2) if np.isfinite(room) else 99,
+                                           room=round(float(room), 2) if np.isfinite(room) else 99, wall=bool(wall),
                                            entry=float(entry), stop=float(stop), **res))
         print(f"{sym}: угод {len([x for x in trades if x['sym'] == sym])}")
 
@@ -243,18 +244,20 @@ def run(src):
         "контекст: проти": lambda x: x["ctx"] == "against",
         "у бік + фільтр 1R": lambda x: x["ctx"] == "with" and x["room"] >= 1,
         "будь-який + фільтр 1R": lambda x: x["room"] >= 1,
-        "не проти + фільтр 1R": lambda x: x["ctx"] != "against" and x["room"] >= 1,
+        "у бік + без стіни (1 ATR)": lambda x: x["ctx"] == "with" and not x["wall"],
+        "будь-який + без стіни (1 ATR)": lambda x: not x["wall"],
+        "проти + без стіни (1 ATR)": lambda x: x["ctx"] == "against" and not x["wall"],
     }
     for sv in ("spec", "atr1.5"):
-        for ex in ("E1", "E2", "E3"):
+        for ex in ("E1", "E3"):
             for fn, f in filt.items():
                 tt = sorted([x for x in trades if x["sv"] == sv and f(x)], key=lambda x: x["t"])
                 row = {"all": st([x[ex] for x in tt])}
-                for tf in ("1m", "5m", "15m"):
+                for tf in ("1m", "5m", "15m", "1H"):
                     row[tf] = st([x[ex] for x in tt if x["tf"] == tf])
                 row["5-15 1st"] = st([x[ex] for x in tt if x["tf"] != "1m" and x["t"] < mid])
                 row["5-15 2nd"] = st([x[ex] for x in tt if x["tf"] != "1m" and x["t"] >= mid])
                 print("BT3", f"{sv}|{ex}|{fn}", json.dumps(row, ensure_ascii=False))
     for x in trades:
-        if x["t"][:10] == today and x["sv"] == "spec":
+        if x["t"][:10] >= str((now - pd.Timedelta(days=1)).tz_convert(bot.LOCAL_TZ).date()) and x["sv"] == "spec":
             print("TODAY", json.dumps(x, ensure_ascii=False))
