@@ -50,7 +50,7 @@ def split(v):
 
 
 SYMBOLS = split(env("SYMBOLS", "US500,NAS100,GER40,EURUSD,GBPUSD,AUDUSD,NZDUSD,XAUUSD"))
-SIGNAL_TFS = split(env("SIGNAL_TFS", "1m,5m,15m,30m,1H,4H,1D"))
+SIGNAL_TFS = split(env("SIGNAL_TFS_V2", "1m,2m,3m,5m,15m,30m,1H,2H,4H,1D"))
 WT_N1 = int(env("WT_CHANNEL", "10"))
 WT_N2 = int(env("WT_AVERAGE", "21"))
 WT_OB = float(env("WT_OB", "60"))
@@ -63,12 +63,22 @@ RUN_MINUTES = int(env("RUN_MINUTES", "310"))      # скільки максим�
 SESSION_TZ = ZoneInfo(env("SESSION_TZ", "America/New_York"))
 SESSION_CLOSE_HOUR = int(env("SESSION_CLOSE_HOUR", "17"))  # денна свічка закривається о 17:00 NY
 CONTEXT_MAX_BACK = int(env("CONTEXT_MAX_BACK", "5"))
-REVERSAL_ALERTS = env("REVERSAL_ALERTS", "1") == "1"   # ⚡ сигнал «можливий розворот» від свіпу PDL/PDH
+REVERSAL_ALERTS = env("REVERSAL_ALERTS_V2", "0") == "1"   # ⚡ «свіп + повернення» — вимкнено: на історії PF 0.6–0.7
+COUNTER_FVG = env("COUNTER_FVG", "1") == "1"   # 🔄 проти контексту: закріп за FVG + чистий шлях ≥ COUNTER_CLEAR_ATR
+COUNTER_CLEAR_ATR = float(env("COUNTER_CLEAR_ATR", "1.5"))
 DRY_RUN = env("DRY_RUN", "0") == "1"
 STATE_FILE = Path(env("STATE_FILE", "state/state.json"))
 
-TF_MIN = {"1m": 1, "5m": 5, "15m": 15, "30m": 30, "1H": 60, "4H": 240, "1D": 1440}
-TF_LABEL = {"1m": "M1", "5m": "M5", "15m": "M15", "30m": "M30", "1H": "H1", "4H": "H4", "1D": "D1"}
+TF_MIN = {"1m": 1, "2m": 2, "3m": 3, "5m": 5, "15m": 15, "30m": 30, "1H": 60, "2H": 120, "4H": 240, "1D": 1440}
+TF_LABEL = {"1m": "M1", "2m": "M2", "3m": "M3", "5m": "M5", "15m": "M15", "30m": "M30", "1H": "H1", "2H": "H2",
+            "4H": "H4", "1D": "D1"}
+DERIVED = {"2m": ("1m", 2), "3m": ("1m", 3), "2H": ("1H", 120)}  # будуються зі свічок молодшого ТФ
+# Позначка за ТФ — з великого бектесту (19.11.2026, 12.6 тис. входів, до 17 міс.)
+TF_GRADE = {"30m": "🅰️", "1H": "🅰️", "2H": "🅰️", "1m": "🅱️", "2m": "🅱️", "3m": "🅱️", "4H": "🅱️", "1D": "🅱️",
+            "5m": "⚠️", "15m": "⚠️"}
+TF_GRADE_TEXT = {"🅰️": "Ядро (M30/H1/H2): історично PF ≈ 1.5–1.7",
+                 "🅱️": "Додатковий ТФ: історично слабкий плюс, PF ≈ 1.1–1.3",
+                 "⚠️": "M5/M15: історично в мінусі — обережно"}
 FIRST_FETCH_DAYS = {"1m": 2, "5m": 4, "15m": 8, "30m": 12, "1H": 20, "4H": 70}
 HISTORY_H1_DAYS = 300   # для денних свічок і WT на D
 BIAS_ICON = {"BULL": "🟢", "BEAR": "🔴", "NEUTRAL": "⚪"}
@@ -464,6 +474,15 @@ class BarCache:
         self.src, self.data = src, {}
 
     def get(self, sym, tf):
+        if tf in DERIVED:
+            base, mins = DERIVED[tf]
+            b = self.get(sym, base)
+            if b.empty:
+                return b
+            r = b.resample(f"{mins}min", label="left", closed="left").agg(
+                {"open": "first", "high": "max", "low": "min", "close": "last"}).dropna()
+            last_close = b.index[-1] + pd.Timedelta(minutes=TF_MIN[base])
+            return r[r.index + pd.Timedelta(minutes=mins) <= last_close]
         key = (sym, tf)
         now = pd.Timestamp.now(tz="UTC")
         old = self.data.get(key)
@@ -820,6 +839,23 @@ def check_cycle(cache, ctx, state, first=False):
                         continue
                     sent.append(key)
                     hits[kind].append((tf, side, df, wt1, wt2, i, ext, swept))
+                if COUNTER_FVG and tf != "1D" and c["bias"] in ("BULL", "BEAR"):
+                    cside = "SHORT" if c["bias"] == "BULL" else "LONG"
+                    for i, ext2, flo, fhi in fvg_entry_signal(df, wt1, cside):
+                        if i < len(df) - 3 or now - (df.index[i] + dur) > dur * 2 + pd.Timedelta(minutes=10):
+                            continue
+                        key = f"{sym}|{tf}|{int(df.index[i].timestamp())}|{cside}|fvg"
+                        if key in sent:
+                            continue
+                        sent.append(key)
+                        if find_open(state, sym, cside):
+                            continue
+                        price = float(df["close"].iloc[i])
+                        d_atr, wtxt, _ = fvg_against(cache, sym, cside, price, tf)
+                        if d_atr >= COUNTER_CLEAR_ATR:
+                            send_counter(sym, c, tf, cside, df, i, ext2, flo, fhi, cache, state, wtxt)
+                        else:
+                            print(f"{sym} {tf} 🔄 {cside}: пропущено, FVG проти через {d_atr:.1f} ATR")
             except Exception as e:
                 print(f"{sym} {tf}: помилка: {e}")
         for kind, hh in hits.items():
@@ -829,7 +865,8 @@ def check_cycle(cache, ctx, state, first=False):
                     send_signal(sym, c, group, side, kind, cache, state)
                     if kind == "rev":
                         state.get("armed", {}).pop(f"{sym}|{side}", None)
-        check_armed(cache, sym, c, state)
+        if REVERSAL_ALERTS:
+            check_armed(cache, sym, c, state)
 
 
 def arm(state, sym, side, tf, ext, lvl, when):
@@ -907,7 +944,8 @@ def check_armed(cache, sym, c, state):
         ext_name = "дно" if long_ else "вершина"
         since_l = since.tz_convert(LOCAL_TZ)
         stop, r_txt = plan_stop(sym, side, close5, a["ext"])
-        blocked, wall_txt = fvg_wall(cache, sym, side, close5)
+        blocked = False
+        _, wall_txt, _ = fvg_against(cache, sym, side, close5, conf_tf)
         caption = (
             f"⚡ <b>Можливий розворот</b> · {icon} <b>{side} · {sym}</b>\n" + mark +
             f"Свіп {lvl_name} {fmt(a['lvl'])}: {ext_name} {fmt(a['ext'])}, WT вийшов {'з дна' if long_ else 'з вершини'} "
@@ -927,7 +965,7 @@ def check_armed(cache, sym, c, state):
                        mid, "⚡", silent=blocked)
 
 
-TF_CHAIN = ["1m", "5m", "15m", "30m", "1H", "4H"]
+TF_CHAIN = ["1m", "2m", "3m", "5m", "15m", "30m", "1H", "2H", "4H"]
 
 
 def check_context_break(cache, sym, c, state):
@@ -980,35 +1018,12 @@ def htf_state(cache, sym, tf):
 
 
 def grade(c, side, htf, sig_tf="1m"):
-    """🅰️ / 🅱️ / ⚠️ і пояснення.
-    🅰️ — дно/вершина є на M15 або старшому ТФ (WT біля зони: ≤ −50 для лонга, ≥ 50 для шорта);
-    🅱️ — контекст зламано, але M15, H1 і H4 разом на дні/вершині (потрійне дно/вершина);
-    ⚠️ — контекст зламано або старші ТФ ідуть проти і біля зони немає жодного;
-    🅱️ — решта (розворот лише на молодших ТФ)."""
-    long_ = side == "LONG"
-    near = lambda v: v <= -50 if long_ else v >= 50
-    far_opp = lambda v: v < 50 if long_ else v > -50  # не в протилежній зоні
-    # старший ТФ «за нас» лише якщо явно розвертається (|Δ| ≥ 1); плоский або проти — рахуємо як проти
-    against = lambda d: d < 1.0 if long_ else d > -1.0
-    with_us = lambda d: d >= 1.0 if long_ else d <= -1.0
-    by = {h[0]: h for h in htf}
+    """Позначка за ТФ сигналу (дані бектесту): 🅰️ ядро M30/H1/H2, 🅱️ M1–M3 і H4/D1, ⚠️ M5/M15."""
+    icon = TF_GRADE.get(sig_tf, "🅱️")
+    text = TF_GRADE_TEXT[icon]
     if c.get("broken"):
-        if all(t in by and near(by[t][1]) for t in ("15m", "1H", "4H")):
-            return "🅱️", (f"Розворот з {'дна' if long_ else 'вершини'} старших ТФ (M15+H1+H4), "
-                          f"хоча контекст зламано")
-        return "⚠️", f"Слабкий: контекст зламано (H1 закрився {'нижче PDL' if long_ else 'вище PDH'})"
-    deep = [h for h in htf if TF_MIN[h[0]] >= 15 and near(h[1])]
-    if TF_MIN.get(sig_tf, 1) >= 15 or deep:
-        top = TF_LABEL[deep[-1][0]] if deep else TF_LABEL[sig_tf]
-        return "🅰️", f"Сильний: {'дно' if long_ else 'вершина'} на {top}"
-    if not htf:
-        return "🅱️", "Середній"
-    nxt = htf[0]
-    big = [h for h in htf if h[0] in ("1H", "4H")]
-    big_against = bool(big) and all(against(h[2]) for h in big)
-    if against(nxt[2]) and big_against and not near(nxt[1]):
-        return "⚠️", "Слабкий: старші ТФ ідуть проти, біля зони — лише " + TF_LABEL[sig_tf]
-    return "🅱️", f"Середній: {'дно' if long_ else 'вершина'} лише на молодших ТФ"
+        text += f" · контекст зламано (H1 закрився {'нижче PDL' if side == 'LONG' else 'вище PDH'})"
+    return icon, text
 
 
 def htf_line(htf):
@@ -1060,7 +1075,12 @@ def send_signal(sym, c, hits, side, kind, cache=None, state=None):
     if state is not None and tf_top != "1D":
         stop, r_txt = plan_stop(sym, side, price, ext_top)
         open_same = find_open(state, sym, side)
-        blocked, wall_txt = fvg_wall(cache, sym, side, price) if cache is not None else (False, "")
+        blocked = False
+        wall_txt = ""
+        if cache is not None:
+            d_atr, wall_txt, edge = fvg_against(cache, sym, side, price, tf_top)
+            if edge is not None and stop is not None and abs(price - stop) > 0 and d_atr > 0:
+                wall_txt += f" · до нього {abs(edge - price) / abs(price - stop):.1f}R (ціль для ½ у проп-режимі)"
         if open_same:
             caption += (f"\nℹ️ Угода {side} з {open_same['t_open']} ще відкрита — це підтвердження/добір, "
                         f"нову не відкриваю.")
@@ -1077,50 +1097,117 @@ def send_signal(sym, c, hits, side, kind, cache=None, state=None):
                    mid, (g_icon or "⚡"), silent=blocked)
 
 
-def fvg_wall(cache, sym, side, price):
-    """FVG-стіна: незаповнений FVG M15/H1 проти угоди ближче 1 ATR(14) M15 або ціна всередині нього.
-    Повертає (blocked, текст). Заповнений = тіло закрилось за дальнім краєм."""
+def fvg_against(cache, sym, side, price, tf):
+    """Найближчий незаповнений FVG проти угоди на ТФ сигналу і всіх старших (до H4).
+    Повертає (відстань у ATR M15, текст) або (inf, текст). Заповнений = тіло закрилось за дальнім краєм."""
     try:
         d15 = cache.get(sym, "15m")
         atr = float((d15["high"] - d15["low"]).tail(14).mean())
     except Exception as e:
-        return False, f"FVG-стіну не перевірено ({e})"
+        return float("inf"), f"FVG не перевірено ({e})", None
     if not atr or np.isnan(atr):
-        return False, "FVG-стіну не перевірено (немає ATR)"
+        return float("inf"), "FVG не перевірено (немає ATR)", None
+    start = TF_CHAIN.index(tf) if tf in TF_CHAIN else len(TF_CHAIN) - 1
     best = None
-    for tf in ("15m", "1H"):
+    for t in TF_CHAIN[start:]:
         try:
-            df = cache.get(sym, tf).tail(400)
+            df = cache.get(sym, t).tail(500)
         except Exception:
             continue
         h, l, c = df["high"].to_numpy(), df["low"].to_numpy(), df["close"].to_numpy()
         for i in range(2, len(df)):
             if side == "LONG" and h[i] < l[i - 2]:      # ведмежий FVG над нами
                 lo, hi = h[i], l[i - 2]
-                if (c[i + 1:] > hi).any() or hi <= price:
+                if hi <= price or (c[i + 1:] > hi).any():
                     continue
-                dist = max(0.0, lo - price) / atr
+                dist = max(0.0, lo - price)
             elif side == "SHORT" and l[i] > h[i - 2]:   # бичачий FVG під нами
                 lo, hi = h[i - 2], l[i]
-                if (c[i + 1:] < lo).any() or lo >= price:
+                if lo >= price or (c[i + 1:] < lo).any():
                     continue
-                dist = max(0.0, price - hi) / atr
+                dist = max(0.0, price - hi)
             else:
                 continue
             if best is None or dist < best[0]:
-                best = (dist, tf, lo, hi)
+                best = (dist, t, lo, hi)
     if best is None:
-        return False, "✅ Попереду чисто: незаповнених FVG проти на M15/H1 немає"
-    dist, tf, lo, hi = best
-    txt = f"FVG {TF_LABEL[tf]} {fmt(lo)}–{fmt(hi)} ({dist:.1f} ATR)"
-    if dist < 1.0:
-        return True, f"⛔ <b>Не беремо</b>: попереду {txt} — ближче 1 ATR. Веду віртуально для статистики"
-    return False, f"✅ Попереду чисто: найближчий {txt}"
+        return float("inf"), "✅ Шлях чистий: незаповнених FVG проти до H4 немає", None
+    dist, t, lo, hi = best
+    d_atr = dist / atr
+    edge = lo if side == "LONG" else hi
+    txt = f"FVG {TF_LABEL[t]} {fmt(lo)}–{fmt(hi)} ({d_atr:.1f} ATR)"
+    if d_atr >= 1.0:
+        return d_atr, f"✅ Шлях чистий: найближчий {txt}", edge
+    return d_atr, f"🧱 FVG проти близько: {txt}", edge
+
+
+def fvg_entry_signal(df, w1, side):
+    """Вхід за спекою: після дна (вершини) WT тіло свічки закрилось за найближчим незаповненим FVG проти нас
+    (з урахуванням тіней, що в нього заходили). Повертає [(i, дно/вершина, низ FVG, верх FVG)]."""
+    h, l, c = df["high"].to_numpy(), df["low"].to_numpy(), df["close"].to_numpy()
+    w = w1.to_numpy()
+    if side == "SHORT":
+        h, l, c, w = -l, -h, -c, -w
+        os_ = -WT_OB
+    else:
+        os_ = WT_OS
+    out = []
+    active, dno, zs, used = False, np.nan, 0, False
+    fvgs = []
+    for i in range(2, len(c)):
+        if w[i] <= os_:
+            if not active or w[i - 1] > os_:
+                active, dno, zs, used = True, l[i], i, False
+            else:
+                dno = min(dno, l[i])
+        elif active:
+            if c[i] < dno:
+                active = False
+            elif l[i] < dno:
+                dno = l[i]
+        if active and not used:
+            cands = [f for f in fvgs if f[3] >= zs - 3 and f[0] > dno]
+            if cands:
+                near = min(cands, key=lambda f: f[0])
+                if c[i] > near[2]:
+                    if side == "SHORT":
+                        out.append((i, -dno, -near[1], -near[0]))
+                    else:
+                        out.append((i, dno, near[0], near[1]))
+                    used = True
+        fvgs = [f for f in fvgs if c[i] <= f[2]]
+        for f in fvgs:
+            if h[i] >= f[0]:
+                f[2] = max(f[2], h[i])
+        if h[i] < l[i - 2]:
+            fvgs.append([h[i], l[i - 2], l[i - 2], i])
+    return out
+
+
+def send_counter(sym, c, tf, side, df, i, ext, flo, fhi, cache, state, wall_txt):
+    """🔄 Проти контексту: закріп за FVG + чистий шлях."""
+    long_ = side == "LONG"
+    price = float(df["close"].iloc[i])
+    stop, r_txt = plan_stop(sym, side, price, ext)
+    icon = "🟢" if long_ else "🔴"
+    caption = (f"🔄 <b>Проти контексту</b> · {icon} <b>{side} · {sym} · {TF_LABEL[tf]}</b>\n"
+               f"{'Дно' if long_ else 'Вершина'} WT {fmt(ext)} → тіло закрилось {'вище' if long_ else 'нижче'} "
+               f"FVG {fmt(flo)}–{fmt(fhi)}\n"
+               f"Контекст дня: {BIAS_ICON[c['bias']]} {c['bias']} — сигнал проти нього\n"
+               f"{wall_txt}\n"
+               f"Історично: PF ≈ 1.66, вінрейт ≈ 33% (лише з чистим шляхом ≥ {COUNTER_CLEAR_ATR:g} ATR)\n"
+               f"📐 Вхід {fmt(price)} · Стоп {fmt(stop)} (за {'дном' if long_ else 'вершиною'}) · 1R = {r_txt}\n"
+               f"Вихід: ½ — протилежний сигнал {TF_LABEL[tf]}, ½ — протилежний {TF_LABEL[EXIT_TF.get(tf, '1D')]}\n"
+               f"Ціна: {fmt(price)} · {datetime.now(LOCAL_TZ):%H:%M}" + (f"\nДані: {c['src']}" if c.get("src") else ""))
+    png = chart(df.iloc[: i + 1], f"{sym} · {TF_LABEL[tf]} · {side} · проти контексту", c["pdh"], c["pdl"], mark=side)
+    mid = send_photo(png, caption)
+    open_trade(state, sym, side, tf, price, stop, df.index[i] + pd.Timedelta(minutes=TF_MIN[tf]), mid, "🔄")
 
 
 # ============================================================================ супровід угод
 
-EXIT_TF = {"1m": "5m", "5m": "15m", "15m": "1H", "30m": "4H", "1H": "4H", "4H": "1D"}
+EXIT_TF = {"1m": "5m", "2m": "5m", "3m": "15m", "5m": "15m", "15m": "1H", "30m": "4H", "1H": "4H", "2H": "4H",
+           "4H": "1D"}
 INDEX_LIKE = ("US500", "SPX", "NAS", "NDX", "GER", "DAX", "XAU")
 
 
@@ -1325,6 +1412,10 @@ def send_daily_summary(state):
         tot = sum(j["total"] for j in done)
         wins = sum(1 for j in done if j["total"] > 0)
         lines.append(f"Закрито {len(done)} · у плюсі {wins} · разом {tot:+.1f}R")
+        for g in ("🅰️", "🅱️", "⚠️", "🔄"):
+            gg = [j for j in done if j.get("grade") == g]
+            if gg:
+                lines.append(f"   {g}: {len(gg)} угод · {sum(j['total'] for j in gg):+.1f}R")
         for j in done:
             lines.append(f"{'✅' if j['total'] > 0 else '◻️' if j['total'] == 0 else '❌'} {j['grade']} {j['sym']} "
                          f"{j['side']} {TF_LABEL[j['tf']]} {j['t_open']}→{j['t_close']}: {j['total']:+.1f}R ({j['how']})")
