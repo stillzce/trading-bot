@@ -907,6 +907,7 @@ def check_armed(cache, sym, c, state):
         ext_name = "дно" if long_ else "вершина"
         since_l = since.tz_convert(LOCAL_TZ)
         stop, r_txt = plan_stop(sym, side, close5, a["ext"])
+        blocked, wall_txt = fvg_wall(cache, sym, side, close5)
         caption = (
             f"⚡ <b>Можливий розворот</b> · {icon} <b>{side} · {sym}</b>\n" + mark +
             f"Свіп {lvl_name} {fmt(a['lvl'])}: {ext_name} {fmt(a['ext'])}, WT вийшов {'з дна' if long_ else 'з вершини'} "
@@ -914,6 +915,7 @@ def check_armed(cache, sym, c, state):
             f"{TF_LABEL[conf_tf]} закрилась {'вище' if long_ else 'нижче'} {lvl_name} із запасом ✅ ({fmt(close5)})\n"
             + htf_line(htf) +
             f"Ранковий контекст: {BIAS_ICON[c['bias']]} {c['bias']} — {c['note']} (сигнал проти нього)\n"
+            + wall_txt + "\n" +
             f"📐 Вхід {fmt(close5)} · Стоп {fmt(stop)} (за {"дном" if long_ else "вершиною"}) · 1R = {r_txt}\n"
             f"Вихід: ½ — протилежний сигнал {TF_LABEL[conf_tf]}, ½ — протилежний {TF_LABEL[EXIT_TF[conf_tf]]}\n"
             f"Ціна: {fmt(price)} · {datetime.now(LOCAL_TZ):%H:%M}" + (f"\nДані: {c['src']}" if c.get("src") else "")
@@ -922,7 +924,7 @@ def check_armed(cache, sym, c, state):
         mid = send_photo(png, caption)
         if not find_open(state, sym, side):
             open_trade(state, sym, side, conf_tf, close5, stop, m5.index[-1] + pd.Timedelta(minutes=TF_MIN[conf_tf]),
-                       mid, "⚡")
+                       mid, "⚡", silent=blocked)
 
 
 TF_CHAIN = ["1m", "5m", "15m", "30m", "1H", "4H"]
@@ -980,7 +982,6 @@ def htf_state(cache, sym, tf):
 def grade(c, side, htf, sig_tf="1m"):
     """🅰️ / 🅱️ / ⚠️ і пояснення.
     🅰️ — дно/вершина є на M15 або старшому ТФ (WT біля зони: ≤ −50 для лонга, ≥ 50 для шорта);
-    🅰️ — відкат у тренді: H1 іде в бік сигналу, а M15 не в протилежній зоні;
     🅱️ — контекст зламано, але M15, H1 і H4 разом на дні/вершині (потрійне дно/вершина);
     ⚠️ — контекст зламано або старші ТФ ідуть проти і біля зони немає жодного;
     🅱️ — решта (розворот лише на молодших ТФ)."""
@@ -1000,9 +1001,6 @@ def grade(c, side, htf, sig_tf="1m"):
     if TF_MIN.get(sig_tf, 1) >= 15 or deep:
         top = TF_LABEL[deep[-1][0]] if deep else TF_LABEL[sig_tf]
         return "🅰️", f"Сильний: {'дно' if long_ else 'вершина'} на {top}"
-    h1, m15 = by.get("1H"), by.get("15m")
-    if h1 and with_us(h1[2]) and (m15 is None or far_opp(m15[1])):
-        return "🅰️", "Сильний: відкат у тренді H1"
     if not htf:
         return "🅱️", "Середній"
     nxt = htf[0]
@@ -1062,12 +1060,13 @@ def send_signal(sym, c, hits, side, kind, cache=None, state=None):
     if state is not None and tf_top != "1D":
         stop, r_txt = plan_stop(sym, side, price, ext_top)
         open_same = find_open(state, sym, side)
+        blocked, wall_txt = fvg_wall(cache, sym, side, price) if cache is not None else (False, "")
         if open_same:
             caption += (f"\nℹ️ Угода {side} з {open_same['t_open']} ще відкрита — це підтвердження/добір, "
                         f"нову не відкриваю.")
             stop = None
         else:
-            caption += (f"\n📐 Вхід {fmt(price)} · Стоп {fmt(stop)} (за {"дном" if long_ else "вершиною"}) · 1R = {r_txt}\n"
+            caption += ("\n" + wall_txt if wall_txt else "") + (f"\n📐 Вхід {fmt(price)} · Стоп {fmt(stop)} (за {"дном" if long_ else "вершиною"}) · 1R = {r_txt}\n"
                         f"Вихід: ½ — протилежний сигнал {TF_LABEL[tf_top]}, ½ — протилежний {TF_LABEL[EXIT_TF[tf_top]]}")
     caption += f"\nЦіна: {fmt(price)} · {datetime.now(LOCAL_TZ):%H:%M}" + (f"\nДані: {c['src']}" if c.get("src") else "")
     png = chart(df_top.iloc[: i_top + 1], f"{sym} · {TF_LABEL[tf_top]} · {side}" + (" · розворот?" if kind == "rev" else ""),
@@ -1075,7 +1074,48 @@ def send_signal(sym, c, hits, side, kind, cache=None, state=None):
     mid = send_photo(png, caption)
     if stop is not None:
         open_trade(state, sym, side, tf_top, price, stop, df_top.index[i_top] + pd.Timedelta(minutes=TF_MIN[tf_top]),
-                   mid, (g_icon or "⚡"))
+                   mid, (g_icon or "⚡"), silent=blocked)
+
+
+def fvg_wall(cache, sym, side, price):
+    """FVG-стіна: незаповнений FVG M15/H1 проти угоди ближче 1 ATR(14) M15 або ціна всередині нього.
+    Повертає (blocked, текст). Заповнений = тіло закрилось за дальнім краєм."""
+    try:
+        d15 = cache.get(sym, "15m")
+        atr = float((d15["high"] - d15["low"]).tail(14).mean())
+    except Exception as e:
+        return False, f"FVG-стіну не перевірено ({e})"
+    if not atr or np.isnan(atr):
+        return False, "FVG-стіну не перевірено (немає ATR)"
+    best = None
+    for tf in ("15m", "1H"):
+        try:
+            df = cache.get(sym, tf).tail(400)
+        except Exception:
+            continue
+        h, l, c = df["high"].to_numpy(), df["low"].to_numpy(), df["close"].to_numpy()
+        for i in range(2, len(df)):
+            if side == "LONG" and h[i] < l[i - 2]:      # ведмежий FVG над нами
+                lo, hi = h[i], l[i - 2]
+                if (c[i + 1:] > hi).any() or hi <= price:
+                    continue
+                dist = max(0.0, lo - price) / atr
+            elif side == "SHORT" and l[i] > h[i - 2]:   # бичачий FVG під нами
+                lo, hi = h[i - 2], l[i]
+                if (c[i + 1:] < lo).any() or lo >= price:
+                    continue
+                dist = max(0.0, price - hi) / atr
+            else:
+                continue
+            if best is None or dist < best[0]:
+                best = (dist, tf, lo, hi)
+    if best is None:
+        return False, "✅ Попереду чисто: незаповнених FVG проти на M15/H1 немає"
+    dist, tf, lo, hi = best
+    txt = f"FVG {TF_LABEL[tf]} {fmt(lo)}–{fmt(hi)} ({dist:.1f} ATR)"
+    if dist < 1.0:
+        return True, f"⛔ <b>Не беремо</b>: попереду {txt} — ближче 1 ATR. Веду віртуально для статистики"
+    return False, f"✅ Попереду чисто: найближчий {txt}"
 
 
 # ============================================================================ супровід угод
@@ -1108,22 +1148,23 @@ def plan_stop(sym, side, entry, ext):
 
 
 def find_open(state, sym, side):
-    return next((t for t in state.get("trades", []) if t["sym"] == sym and t["side"] == side), None)
+    return next((t for t in state.get("trades", []) if t["sym"] == sym and t["side"] == side
+                 and not t.get("silent")), None)
 
 
-def open_trade(state, sym, side, tf, entry, stop, t_open, mid, grade_icon):
+def open_trade(state, sym, side, tf, entry, stop, t_open, mid, grade_icon, silent=False):
     t_open = pd.Timestamp(t_open)
     state.setdefault("trades", []).append(dict(
         sym=sym, side=side, tf=tf, xtf=EXIT_TF.get(tf, "1D"), entry=float(entry), stop=float(stop),
         stop0=float(stop), R=float(abs(entry - stop)), t_open=f"{t_open.tz_convert(LOCAL_TZ):%H:%M}",
-        ts_open=str(t_open), t_last=str(t_open), mid=mid, half=None, one_r=False, grade=grade_icon,
+        ts_open=str(t_open), t_last=str(t_open), mid=mid, half=None, one_r=False, grade=grade_icon, silent=bool(silent),
         date=datetime.now(LOCAL_TZ).strftime("%Y-%m-%d")))
 
 
 def reentry_of(state, sym, side):
     today = datetime.now(LOCAL_TZ).strftime("%Y-%m-%d")
     done = [j for j in state.get("journal", []) if j["sym"] == sym and j["side"] == side
-            and j.get("close_date") == today and j.get("total", 0) > 0]
+            and j.get("close_date") == today and j.get("total", 0) > 0 and not j.get("silent")]
     return done[-1]["t_close"] if done else None
 
 
@@ -1159,6 +1200,7 @@ def manage_trades(cache, ctx, state, first=False):
     minute_idx = int(now.timestamp() // 60)
     for t in list(state.get("trades", [])):
         sym, side = t["sym"], t["side"]
+        send_text = (lambda *a, **k: None) if t.get("silent") else globals()["send_text"]
         c = ctx.get(sym)
         if c is None:
             continue
@@ -1247,7 +1289,7 @@ def manage_trades(cache, ctx, state, first=False):
 
 def check_warnings(state):
     """За 5 хв до даних США (8:30 NY) і відкриття NY (9:30 NY) — нагадування про відкриті угоди."""
-    trades = state.get("trades", [])
+    trades = [t for t in state.get("trades", []) if not t.get("silent")]
     if not trades:
         return
     ny = datetime.now(SESSION_TZ)
@@ -1272,9 +1314,11 @@ def check_warnings(state):
 
 def send_daily_summary(state):
     today = datetime.now(LOCAL_TZ).strftime("%Y-%m-%d")
-    done = [j for j in state.get("journal", []) if j.get("close_date") == today]
-    opened = state.get("trades", [])
-    if not done and not opened:
+    alld = [j for j in state.get("journal", []) if j.get("close_date") == today]
+    done = [j for j in alld if not j.get("silent")]
+    skipped = [j for j in alld if j.get("silent")]
+    opened = [t for t in state.get("trades", []) if not t.get("silent")]
+    if not done and not opened and not skipped:
         return
     lines = [f"📊 <b>Підсумок дня</b> · {datetime.now(LOCAL_TZ):%d.%m}"]
     if done:
@@ -1289,6 +1333,10 @@ def send_daily_summary(state):
         for t in opened:
             lines.append(f"• {t['grade']} {t['sym']} {t['side']} {TF_LABEL[t['tf']]} з {t['t_open']}"
                          + (f", ½ зафіксовано {t['half']:+.1f}R" if t["half"] is not None else ""))
+    if skipped:
+        st = sum(j["total"] for j in skipped)
+        lines.append(f"\n⛔ Пропущені через FVG-стіну: {len(skipped)} · у плюсі {sum(1 for j in skipped if j['total'] > 0)}"
+                     f" · віртуально разом {st:+.1f}R")
     lines.append("\n<i>Це віртуальний супровід за правилами, не реальні угоди.</i>")
     send_text("\n".join(lines))
 
