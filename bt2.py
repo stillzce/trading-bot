@@ -86,7 +86,7 @@ def run(src):
                 ext = bot.zone_extreme(df, w1, i, side)
                 entry = c[i]
                 cst = cost_of(sym, entry)
-                for stopv in ("zone", "wide"):
+                for stopv in ("zone", "atr1", "atr1.5", "atr2"):
                     if stopv == "zone":
                         stop = ext - sg * cst / 2
                     else:  # ширший: не ближче ніж 1.5×ATR(14) M15
@@ -95,8 +95,9 @@ def run(src):
                         kk = np.searchsorted((d15.index + pd.Timedelta(minutes=15)).values, t.to_datetime64(), side="right") - 1
                         atr = float(a15.iloc[kk]) if kk >= 14 else np.nan
                         stop = ext - sg * cst / 2
-                        if not np.isnan(atr) and abs(entry - stop) < 1.5 * atr:
-                            stop = entry - sg * 1.5 * atr
+                        mult = float(stopv[3:])
+                        if not np.isnan(atr) and abs(entry - stop) < mult * atr:
+                            stop = entry - sg * mult * atr
                     R = abs(entry - stop)
                     if R < 3 * cst or sg * (entry - stop) <= 0:
                         continue
@@ -140,18 +141,22 @@ def run(src):
 
     def with_us(d, side):
         return d >= 1 if side == "LONG" else d <= -1
+    trades.sort(key=lambda x: x["t"])
+    def mark_pause(tt):
+        out, cnt = [], {}
+        for x in tt:
+            k = (x["sym"], x["side"], x["t"][:10])
+            if cnt.get(k, 0) >= 2:
+                continue
+            out.append(x)
+            if x["R"] < 0:
+                cnt[k] = cnt.get(k, 0) + 1
+        return out
     filters = {
         "усі (як зараз)": lambda x: True,
         "H1 іде в бік угоди": lambda x: with_us(x["h1"][1], x["side"]),
         "H1 проти": lambda x: not with_us(x["h1"][1], x["side"]),
-        "H1 у бік АБО H1 у своїй зоні(±50)": lambda x: with_us(x["h1"][1], x["side"]) or ((x["h1"][0] >= 50) if x["side"] == "SHORT" else (x["h1"][0] <= -50)),
-        "H1 не в протилежній зоні": lambda x: (x["h1"][0] > -50) if x["side"] == "SHORT" else (x["h1"][0] < 50),
-        "H1 і M15 обидва в бік": lambda x: with_us(x["h1"][1], x["side"]) and with_us(x["m15"][1], x["side"]),
-        "H1 у бік + M15 не в прот. зоні": lambda x: with_us(x["h1"][1], x["side"]) and ((x["m15"][0] > -50) if x["side"] == "SHORT" else (x["m15"][0] < 50)),
-        "M15 біля своєї зони (≥50/≤−50)": lambda x: (x["m15"][0] >= 50) if x["side"] == "SHORT" else (x["m15"][0] <= -50),
-        "H1 у бік + H4 у бік": lambda x: with_us(x["h1"][1], x["side"]) and with_us(x["h4"][1], x["side"]),
     }
-
     def st(rs):
         a = np.array(rs)
         if not len(a):
@@ -163,9 +168,11 @@ def run(src):
                 "DD": round(float((np.maximum.accumulate(eq) - eq).max()), 1)}
     rep = {}
     mid = str((now - pd.Timedelta(days=DAYS / 2)).tz_convert(bot.LOCAL_TZ))
-    for sv in ("zone", "wide"):
-        for name, f in filters.items():
-            tt = [x for x in trades if x["stopv"] == sv and f(x)]
+    for sv in ("zone", "atr1", "atr1.5", "atr2"):
+        for name, f in list(filters.items()) + [("пауза після 2 стопів", None)]:
+            tt = [x for x in trades if x["stopv"] == sv and (f is None or f(x))]
+            if f is None:
+                tt = mark_pause(tt)
             rep[f"{sv} | {name}"] = {"all": st([x["R"] for x in tt]),
                                      **{tf: st([x["R"] for x in tt if x["tf"] == tf]) for tf in ("1m", "5m", "15m")},
                                      "5-15m 1st": st([x["R"] for x in tt if x["tf"] != "1m" and x["t"] < mid]),
