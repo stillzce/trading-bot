@@ -1499,6 +1499,18 @@ def main():
         state = load_state()
         check_cycle(cache, ctx, state, first=True)
         save_state(state)
+    elif mode == "dry":  # перевірка без відправки в Telegram і без збереження стану
+        global DRY_RUN
+        DRY_RUN = True
+        cache = BarCache(src)
+        ctx, _ = build_contexts(cache)
+        state = load_state()
+        state["sent"] = []
+        check_cycle(cache, ctx, state, first=True)
+        print("trades:", json.dumps(state.get("trades", []), ensure_ascii=False, default=str)[:3000])
+        manage_trades(cache, ctx, state, first=True)
+        check_warnings(state)
+        send_daily_summary(state)
     elif mode == "loop":
         run_loop(src)
     else:
