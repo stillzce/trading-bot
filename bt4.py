@@ -319,6 +319,8 @@ def run(src):
                         tp5 = entry + sg * t5[0] if len(t5) else None
                         tp6 = entry + sg * t6[0] if len(t6) else None
                         tp8 = entry + sg * 2 * R
+                        t12 = dall[dall > 0]
+                        tp12 = entry + sg * t12[0] if len(t12) else None
 
                         def sim(tp=None, be1r=False, full_tp=False):
                             big = 10 ** 12
@@ -368,7 +370,7 @@ def run(src):
                             return sg * (c[jend] - entry) / R
                         ext6 = [round(v - cst / R, 3) for v in (sim(tp5), sim(tp6), sim(None, be1r=True), sim(tp8),
                                                                   sim(tp5, full_tp=True), sim(tp6, full_tp=True),
-                                                                  sim(tp5, be1r=True))]
+                                                                  sim(tp5, be1r=True), sim(tp12))]
                         res[kk] = (round(R / atr, 3), out["E1"], out["E4"], *ext6)
                     else:
                         res[kk] = (round(R / atr, 3), out["E1"], out["E4"])
@@ -525,7 +527,7 @@ def report6(rows):
     """Порівняння супроводу: E1 як у боті; E4 ½ на найближчому FVG; E5 ½ на FVG ≥1R (ТФ сигналу+);
     E6 ½ на FVG ≥1R лише M15+; E7 БУ на +1R; E8 ½ на 2R; E9 усе на FVG ≥1R; E10 усе на FVG M15+ ≥1R; E11 E5+БУ на 1R."""
     names = ["E1 як зараз", "E4 ½ найближчий FVG", "E5 ½ FVG≥1R", "E6 ½ FVG M15+≥1R", "E7 БУ на 1R", "E8 ½ на 2R",
-             "E9 усе на FVG≥1R", "E10 усе на FVG M15+≥1R", "E11 ½ FVG≥1R + БУ 1R"]
+             "E9 усе на FVG≥1R", "E10 усе на FVG M15+≥1R", "E11 ½ FVG≥1R + БУ 1R", "E12 ½ найближчий FVG попереду"]
     R = [r for r in rows if r[8].get(0.0) and len(r[8][0.0]) > 3]
     R.sort(key=lambda r: r[5])
     sets = {

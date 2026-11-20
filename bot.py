@@ -1688,6 +1688,9 @@ def main():
             os.environ["BT6"] = "1"
         import bt4
         bt4.run(src)
+    elif mode == "probe":
+        import probe
+        probe.run()
     elif mode == "replay":
         import replay
         replay.run(src, arg or "08.00-10.00")
