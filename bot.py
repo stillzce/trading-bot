@@ -1688,6 +1688,9 @@ def main():
             os.environ["BT6"] = "1"
         import bt4
         bt4.run(src)
+    elif mode == "probe2":
+        import probe2
+        probe2.run()
     elif mode == "probe":
         import probe
         probe.run()
