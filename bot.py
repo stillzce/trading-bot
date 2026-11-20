@@ -1076,28 +1076,38 @@ def send_signal(sym, c, hits, side, kind, cache=None, state=None):
         stop, r_txt = plan_stop(sym, side, price, ext_top)
         open_same = find_open(state, sym, side)
         blocked = False
+        tp_half = None
         wall_txt = ""
         if cache is not None:
             d_atr, wall_txt, edge = fvg_against(cache, sym, side, price, tf_top)
-            if edge is not None and stop is not None and abs(price - stop) > 0 and d_atr > 0:
-                wall_txt += f" · до нього {abs(edge - price) / abs(price - stop):.1f}R (ціль для ½ у проп-режимі)"
+            tp_half = None
+            if tf_top in ("1m", "2m", "3m") and stop is not None:
+                # ½ на найближчому FVG проти (бектест: M1–M3 +165R замість +146R). Якщо ціна вже всередині
+                # найближчого FVG — цілі немає, ½ як раніше (варіант «наступний попереду» на історії −46R)
+                if edge is not None and d_atr > 0:
+                    tp_half = edge
+                    wall_txt += (f"\n🎯 ½ фіксуємо на найближчому FVG проти: {fmt(tp_half)} "
+                                 f"({abs(tp_half - price) / abs(price - stop):.1f}R)")
+            elif TF_GRADE.get(tf_top) == "🅰️":
+                wall_txt += "\n🛡 Проп-режим (за бажанням): беззбиток на +1R"
         if open_same:
             caption += (f"\nℹ️ Угода {side} з {open_same['t_open']} ще відкрита — це підтвердження/добір, "
                         f"нову не відкриваю.")
             stop = None
         else:
             caption += ("\n" + wall_txt if wall_txt else "") + (f"\n📐 Вхід {fmt(price)} · Стоп {fmt(stop)} (за {"дном" if long_ else "вершиною"}) · 1R = {r_txt}\n"
-                        f"Вихід: ½ — протилежний сигнал {TF_LABEL[tf_top]}, ½ — протилежний {TF_LABEL[EXIT_TF[tf_top]]}")
+                        f"Вихід: ½ — {'FVG проти або ' if tp_half is not None else ''}протилежний сигнал {TF_LABEL[tf_top]}"
+                        f"{' (що раніше)' if tp_half is not None else ''}, ½ — протилежний {TF_LABEL[EXIT_TF[tf_top]]}")
     caption += f"\nЦіна: {fmt(price)} · {datetime.now(LOCAL_TZ):%H:%M}" + (f"\nДані: {c['src']}" if c.get("src") else "")
     png = chart(df_top.iloc[: i_top + 1], f"{sym} · {TF_LABEL[tf_top]} · {side}" + (" · розворот?" if kind == "rev" else ""),
                 c["pdh"], c["pdl"], mark=side, daily=tf_top == "1D")
     mid = send_photo(png, caption)
     if stop is not None:
         open_trade(state, sym, side, tf_top, price, stop, df_top.index[i_top] + pd.Timedelta(minutes=TF_MIN[tf_top]),
-                   mid, (g_icon or "⚡"), silent=blocked)
+                   mid, (g_icon or "⚡"), silent=blocked, tp_half=tp_half)
 
 
-def fvg_against(cache, sym, side, price, tf):
+def fvg_against(cache, sym, side, price, tf, ahead=False):
     """Найближчий незаповнений FVG проти угоди на ТФ сигналу і всіх старших (до H4).
     Повертає (відстань у ATR M15, текст) або (inf, текст). Заповнений = тіло закрилось за дальнім краєм."""
     try:
@@ -1128,6 +1138,8 @@ def fvg_against(cache, sym, side, price, tf):
                 dist = max(0.0, price - hi)
             else:
                 continue
+            if ahead and dist <= 0:
+                continue  # ціна вже всередині — шукаємо наступний попереду
             if best is None or dist < best[0]:
                 best = (dist, t, lo, hi)
     if best is None:
@@ -1239,12 +1251,13 @@ def find_open(state, sym, side):
                  and not t.get("silent")), None)
 
 
-def open_trade(state, sym, side, tf, entry, stop, t_open, mid, grade_icon, silent=False):
+def open_trade(state, sym, side, tf, entry, stop, t_open, mid, grade_icon, silent=False, tp_half=None):
     t_open = pd.Timestamp(t_open)
     state.setdefault("trades", []).append(dict(
         sym=sym, side=side, tf=tf, xtf=EXIT_TF.get(tf, "1D"), entry=float(entry), stop=float(stop),
         stop0=float(stop), R=float(abs(entry - stop)), t_open=f"{t_open.tz_convert(LOCAL_TZ):%H:%M}",
         ts_open=str(t_open), t_last=str(t_open), mid=mid, half=None, one_r=False, grade=grade_icon, silent=bool(silent),
+        tp_half=float(tp_half) if tp_half is not None else None,
         date=datetime.now(LOCAL_TZ).strftime("%Y-%m-%d")))
 
 
@@ -1337,6 +1350,11 @@ def manage_trades(cache, ctx, state, first=False):
                 h = _first_opp(dfs[t["tf"]], t["tf"], opp, last)
                 if h:
                     ev.append((h[0], 2, "half", h[1]))
+            if t["half"] is None and t.get("tp_half") and not bars.empty:
+                tp = t["tp_half"]
+                hit_tp = bars[bars["high"] >= tp] if long_ else bars[bars["low"] <= tp]
+                if len(hit_tp):
+                    ev.append((hit_tp.index[0] + bdur, 2, "half", tp))
             if not ev:
                 break
             when, _, kind, px = min(ev, key=lambda e: (e[0], e[1]))
@@ -1370,7 +1388,9 @@ def manage_trades(cache, ctx, state, first=False):
                 break
             # half
             t["half"], t["stop"], t["t_last"] = r, t["entry"], str(when)
-            send_text(f"💰 {label}: {TF_LABEL[t['tf']]} {opp_txt} о {wl} — фіксуй ½ @{fmt(px)} ({r:+.1f}R). "
+            why_half = (f"дійшли до FVG проти" if t.get("tp_half") is not None and abs(px - t["tp_half"]) < 1e-9
+                        else f"{TF_LABEL[t['tf']]} {opp_txt}")
+            send_text(f"💰 {label}: {why_half} о {wl} — фіксуй ½ @{fmt(px)} ({r:+.1f}R). "
                       f"Стоп у БУ {fmt(t['entry'])}. Решта — до протилежного сигналу {TF_LABEL[t['xtf']]}", t["mid"])
 
 
