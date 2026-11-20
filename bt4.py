@@ -22,7 +22,7 @@ TFS = ["1m", "2m", "3m", "5m", "15m", "30m", "1H", "2H", "4H"]
 TFM = {"1m": 1, "2m": 2, "3m": 3, "5m": 5, "15m": 15, "30m": 30, "1H": 60, "2H": 120, "4H": 240, "1D": 1440}
 EXIT = {"1m": "5m", "2m": "5m", "3m": "15m", "5m": "15m", "15m": "1H", "30m": "4H", "1H": "4H", "2H": "4H", "4H": "1D"}
 HORIZON_D = {"1m": 2, "2m": 2, "3m": 2, "5m": 3, "15m": 5, "30m": 7, "1H": 10, "2H": 15, "4H": 25}
-KS = [0.0, 0.5, 1.0, 1.5, 2.0]
+KS = [0.0] if os.environ.get("BT6") else [0.0, 0.5, 1.0, 1.5, 2.0]
 COSTF = {"EURUSD": 0.00012, "GBPUSD": 0.00016, "AUDUSD": 0.00012, "NZDUSD": 0.00016}
 OKX_DAYS = {"1m": 60, "5m": 180, "1H": 365}
 YH_DAYS = {"1m": 28, "5m": 58, "1H": 365}
@@ -122,6 +122,22 @@ def fvg_table(df, tf):
             "hi": a[:, 2].astype(float) if len(a) else np.zeros(0),
             "tc": a[:, 3].astype(np.int64) if len(a) else np.zeros(0, np.int64),
             "tf": a[:, 4].astype(np.int64) if len(a) else np.zeros(0, np.int64)}
+
+
+def all_against(tabs, t, side, entry):
+    """Усі відстані (у ціні) до незаповнених FVG проти угоди, відсортовані."""
+    out = []
+    for f in tabs:
+        if not len(f["dir"]):
+            continue
+        alive = (f["tc"] <= t) & (f["tf"] > t)
+        if side == "LONG":
+            m = alive & (f["dir"] == -1) & (f["hi"] > entry)
+            out.append(np.maximum(0.0, f["lo"][m] - entry))
+        else:
+            m = alive & (f["dir"] == 1) & (f["lo"] < entry)
+            out.append(np.maximum(0.0, entry - f["hi"][m]))
+    return np.sort(np.concatenate(out)) if out else np.zeros(0)
 
 
 def nearest_against(tabs, t, side, entry):
@@ -295,7 +311,67 @@ def run(src):
                         else:
                             r = sg * (c[jend] - entry) / R
                         out[ex] = round(r - cst / R, 3)
-                    res[kk] = (round(R / atr, 3), out["E1"], out["E4"])
+                    if os.environ.get("BT6") and kk == 0.0:
+                        dall = all_against(setB, t, side, entry)
+                        dhtf = all_against([FV[x] for x in ("15m", "30m", "1H", "2H", "4H") if x in FV], t, side, entry)
+                        t5 = dall[dall >= R]
+                        t6 = dhtf[dhtf >= R]
+                        tp5 = entry + sg * t5[0] if len(t5) else None
+                        tp6 = entry + sg * t6[0] if len(t6) else None
+                        tp8 = entry + sg * 2 * R
+
+                        def sim(tp=None, be1r=False, full_tp=False):
+                            big = 10 ** 12
+                            cur_stop = stop
+                            hit0 = (ll <= stop) if long_ else (hh >= stop)
+                            js0 = i + 1 + int(np.argmax(hit0)) if hit0.any() else big
+                            jstop, stop_px = js0, stop
+                            if be1r:
+                                r1 = (fav >= entry + R) if long_ else (fav <= entry - R)
+                                j1 = i + 1 + int(np.argmax(r1)) if r1.any() else big
+                                if j1 < js0:
+                                    seg = l[j1 + 1:jend + 1] if long_ else h[j1 + 1:jend + 1]
+                                    be = (seg <= entry) if long_ else (seg >= entry)
+                                    jstop = j1 + 1 + int(np.argmax(be)) if be.any() else big
+                                    stop_px = entry
+                            jt = big
+                            if tp is not None:
+                                touch = (fav >= tp) if long_ else (fav <= tp)
+                                jt = i + 1 + int(np.argmax(touch)) if touch.any() else big
+                            a_h0 = jh if jh is not None and jh <= jend else big
+                            a_x = jx if jx is not None and jx <= jend else big
+                            if full_tp:
+                                if jstop <= min(jt, a_x) and jstop < big:
+                                    return sg * (stop_px - entry) / R
+                                if jt < big and jt <= a_x:
+                                    return sg * (tp - entry) / R
+                                if a_x < big:
+                                    return sg * (px - entry) / R
+                                return sg * (c[jend] - entry) / R
+                            a_h, ph = (jt, tp) if jt < a_h0 else (a_h0, c[jh] if jh is not None else None)
+                            if jstop <= min(a_h, a_x) and jstop < big:
+                                return sg * (stop_px - entry) / R
+                            if a_x < big and a_x <= a_h:
+                                return sg * (px - entry) / R
+                            if a_h < big:
+                                r1v = sg * (ph - entry) / R
+                                if r1v <= 0:
+                                    return r1v
+                                seg = l[a_h + 1:jend + 1] if long_ else h[a_h + 1:jend + 1]
+                                be = (seg <= entry) if long_ else (seg >= entry)
+                                jb = a_h + 1 + int(np.argmax(be)) if be.any() else big
+                                if jb < a_x:
+                                    return r1v / 2
+                                if a_x < big:
+                                    return (r1v + sg * (px - entry) / R) / 2
+                                return (r1v + sg * (c[jend] - entry) / R) / 2
+                            return sg * (c[jend] - entry) / R
+                        ext6 = [round(v - cst / R, 3) for v in (sim(tp5), sim(tp6), sim(None, be1r=True), sim(tp8),
+                                                                  sim(tp5, full_tp=True), sim(tp6, full_tp=True),
+                                                                  sim(tp5, be1r=True))]
+                        res[kk] = (round(R / atr, 3), out["E1"], out["E4"], *ext6)
+                    else:
+                        res[kk] = (round(R / atr, 3), out["E1"], out["E4"])
                 # зміна контексту всередині дня: свіп рівня проти контексту й повернення за нього
                 j0 = int(np.searchsorted(cl, s_start[k], side="right"))
                 if long_:
@@ -310,7 +386,9 @@ def run(src):
                              float(entry)))
         print(f"{sym} ({meta[sym]['src']}): записів {sum(1 for r in rows if r[0] == sym)} · {time.time() - t0:.0f} c")
     print("META", json.dumps(meta, ensure_ascii=False))
-    if os.environ.get("BT5"):
+    if os.environ.get("BT6"):
+        report6(rows)
+    elif os.environ.get("BT5"):
         report5(rows)
     else:
         report(rows)
@@ -441,3 +519,30 @@ def report5(rows):
     for r in R:
         if r[5] >= "2026-11-16":
             print("WEEK", json.dumps([r[0], r[1], r[2], r[3], r[4], r[5], r[7], r[9], r[10], r[11], E(r), E(r, 2)], ensure_ascii=False))
+
+
+def report6(rows):
+    """Порівняння супроводу: E1 як у боті; E4 ½ на найближчому FVG; E5 ½ на FVG ≥1R (ТФ сигналу+);
+    E6 ½ на FVG ≥1R лише M15+; E7 БУ на +1R; E8 ½ на 2R; E9 усе на FVG ≥1R; E10 усе на FVG M15+ ≥1R; E11 E5+БУ на 1R."""
+    names = ["E1 як зараз", "E4 ½ найближчий FVG", "E5 ½ FVG≥1R", "E6 ½ FVG M15+≥1R", "E7 БУ на 1R", "E8 ½ на 2R",
+             "E9 усе на FVG≥1R", "E10 усе на FVG M15+≥1R", "E11 ½ FVG≥1R + БУ 1R"]
+    R = [r for r in rows if r[8].get(0.0) and len(r[8][0.0]) > 3]
+    R.sort(key=lambda r: r[5])
+    sets = {
+        "ядро 30m/1H/2H": lambda r: r[1] in ("30m", "1H", "2H") and ((r[2] == "WT" and r[4] == "with") or
+                                                                    (r[2] == "FVG" and r[4] == "against" and r[7] >= 1.5)),
+        "M1–M3 у бік": lambda r: r[1] in ("1m", "2m", "3m") and r[2] == "WT" and r[4] == "with",
+        "M5/M15 у бік": lambda r: r[1] in ("5m", "15m") and r[2] == "WT" and r[4] == "with",
+        "усі у бік + 🔄": lambda r: (r[2] == "WT" and r[4] == "with") or (r[2] == "FVG" and r[4] == "against" and r[7] >= 1.5),
+    }
+    for sn, f in sets.items():
+        sel = [r for r in R if f(r)]
+        h = len(sel) // 2
+        for k, nm in enumerate(names):
+            ix = 1 + k
+            st = stats5([r[8][0.0][ix] for r in sel])
+            s1 = stats5([r[8][0.0][ix] for r in sel[:h]])
+            s2 = stats5([r[8][0.0][ix] for r in sel[h:]])
+            if st:
+                print("R6", json.dumps({"set": sn, "exit": nm, **st, "h1": s1 and s1["sumR"], "h2": s2 and s2["sumR"]},
+                                       ensure_ascii=False))

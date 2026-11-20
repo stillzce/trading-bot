@@ -1374,6 +1374,26 @@ def manage_trades(cache, ctx, state, first=False):
                       f"Стоп у БУ {fmt(t['entry'])}. Решта — до протилежного сигналу {TF_LABEL[t['xtf']]}", t["mid"])
 
 
+def close_all_eod(cache, state):
+    """Кінець робочого дня: закриваємо всі віртуальні угоди за ринком, щоб нічого не висіло на ніч."""
+    now = pd.Timestamp.now(tz="UTC")
+    for t in list(state.get("trades", [])):
+        try:
+            m = cache.get(t["sym"], base_tf(cache, t["sym"]))
+            px = float(m["close"].iloc[-1])
+        except Exception as e:
+            print(f"{t['sym']}: закриття дня: {e}")
+            continue
+        sg = 1 if t["side"] == "LONG" else -1
+        r = sg * (px - t["entry"]) / t["R"]
+        total = (t["half"] + r) / 2 if t["half"] is not None else r
+        if not t.get("silent"):
+            label = f"{'🟢' if t['side'] == 'LONG' else '🔴'} {t['sym']} {t['side']} {TF_LABEL[t['tf']]} ({t['t_open']})"
+            send_text(f"⏹ {label}: кінець дня — закриваємо {'решту ' if t['half'] is not None else ''}@{fmt(px)} "
+                      f"({r:+.1f}R). Разом {total:+.1f}R", t["mid"])
+        _close_trade(state, t, total, "кінець дня", now)
+
+
 def check_warnings(state):
     """За 5 хв до даних США (8:30 NY) і відкриття NY (9:30 NY) — нагадування про відкриті угоди."""
     trades = [t for t in state.get("trades", []) if not t.get("silent")]
@@ -1420,7 +1440,7 @@ def send_daily_summary(state):
             lines.append(f"{'✅' if j['total'] > 0 else '◻️' if j['total'] == 0 else '❌'} {j['grade']} {j['sym']} "
                          f"{j['side']} {TF_LABEL[j['tf']]} {j['t_open']}→{j['t_close']}: {j['total']:+.1f}R ({j['how']})")
     if opened:
-        lines.append("\nВідкриті на ніч:")
+        lines.append("\nВідкриті (закриються в кінці дня):")
         for t in opened:
             lines.append(f"• {t['grade']} {t['sym']} {t['side']} {TF_LABEL[t['tf']]} з {t['t_open']}"
                          + (f", ½ зафіксовано {t['half']:+.1f}R" if t["half"] is not None else ""))
@@ -1469,6 +1489,7 @@ def run_loop(src):
             manage_trades(cache, ctx, state, first)
             check_warnings(state)
             if datetime.now(LOCAL_TZ) >= end - timedelta(minutes=6) and state.get("summary") != today:
+                close_all_eod(cache, state)
                 send_daily_summary(state)
                 state["summary"] = today
         except Exception as e:
@@ -1660,9 +1681,11 @@ def main():
             os.environ["BT_DAYS"] = arg
         import bt3
         bt3.run(src)
-    elif mode in ("bt4", "bt5"):
+    elif mode in ("bt4", "bt5", "bt6"):
         if mode == "bt5":
             os.environ["BT5"] = "1"
+        if mode == "bt6":
+            os.environ["BT6"] = "1"
         import bt4
         bt4.run(src)
     elif mode == "replay":
