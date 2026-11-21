@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "okx (перевірка підключення) / loop / once / test"
+        description: "okx (перевірка) / okxreset (закрити все) / loop / once"
         default: "okx"
 
 concurrency:
@@ -34,13 +34,13 @@ jobs:
 
       - run: pip install -r requirements.txt
 
-      # окремий стан, щоб не змішувався з основним ботом (ключ НЕ починається з "state-")
+      # окремий стан, щоб не змішувався з основним ботом (ключ НЕ починається з "state-"; okxdemo2 — тест з нуля 21.11)
       - name: Відновити стан
         uses: actions/cache/restore@v4
         with:
           path: state
-          key: okxdemo-${{ github.run_id }}
-          restore-keys: okxdemo-
+          key: okxdemo2-${{ github.run_id }}
+          restore-keys: okxdemo2-
 
       - name: Запуск
         env:
@@ -51,7 +51,7 @@ jobs:
           OKX_DEMO_SECRET: ${{ secrets.OKX_DEMO_SECRET }}
           OKX_DEMO_PASSPHRASE: ${{ secrets.OKX_DEMO_PASSPHRASE }}
           OKX_SYMBOLS: ${{ vars.OKX_SYMBOLS }}
-          OKX_START_BALANCE: ${{ vars.OKX_START_BALANCE }}
+          OKX_START_BALANCE: ${{ vars.OKX_START_BALANCE || '300' }}
           RISK_PCT: ${{ vars.OKX_RISK_PCT }}
           OKX_LEVERAGE: ${{ vars.OKX_LEVERAGE }}
           WT_OB: ${{ vars.WT_OB }}
@@ -69,7 +69,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: state
-          key: okxdemo-${{ github.run_id }}
+          key: okxdemo2-${{ github.run_id }}
 
       - name: Не дати GitHub вимкнути розклад
         if: always()

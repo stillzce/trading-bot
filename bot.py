@@ -54,7 +54,7 @@ OKX_DEMO = env("OKX_DEMO", "0") == "1"
 ALWAYS_ON = env("ALWAYS_ON", "1" if OKX_DEMO else "0") == "1"
 DEMO_TAG = "🧪 <b>ДЕМО OKX</b>\n" if OKX_DEMO else ""
 TRADER = None  # OkxDemoTrader, створюється в main()
-SYMBOLS = split(env("OKX_SYMBOLS", "XAUUSD,US500,NAS100,BTCUSDT,ETHUSDT,SOLUSDT") if OKX_DEMO else
+SYMBOLS = split(env("OKX_SYMBOLS", "BTCUSDT,ETHUSDT,SOLUSDT") if OKX_DEMO else
                 env("SYMBOLS", "US500,NAS100,GER40,EURUSD,GBPUSD,AUDUSD,NZDUSD,XAUUSD"))
 SIGNAL_TFS = split(env("SIGNAL_TFS_V2", "1m,2m,3m,5m,15m,30m,1H,2H,4H,1D"))
 WT_N1 = int(env("WT_CHANNEL", "10"))
@@ -1743,7 +1743,7 @@ def main():
         send_text("✅ Бот на зв'язку")
         return
     src = make_source()
-    if OKX_DEMO and mode in ("loop", "once", "okx"):
+    if OKX_DEMO and mode in ("loop", "once", "okx", "okxreset"):
         global TRADER
         from okx_trader import OkxDemoTrader
         inst = {s: src.ids[s] for s in SYMBOLS if s in getattr(src, "ids", {})}
@@ -1755,6 +1755,11 @@ def main():
         except Exception as e:
             send_text(f"⚠️ Не вдалося підключитись до демо-рахунку OKX: {e}\n"
                       f"Спробую знову з наступним запуском (щогодини).")
+            return
+        if TRADER is not None and mode == "okxreset":
+            closed, n = TRADER.reset_all()
+            send_text("🧹 <b>Тест з нуля</b>: закрито позицій — " + (", ".join(closed) if closed else "0") +
+                      f"; знято стопів — {n}")
             return
         if TRADER is not None:
             st = load_state()

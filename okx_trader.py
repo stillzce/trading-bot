@@ -328,3 +328,26 @@ class OkxDemoTrader:
             pnl += float(f.get("fillPnl") or 0)
             fee += float(f.get("fee") or 0)  # комісія від'ємна
         return pnl + fee, fee
+
+    def reset_all(self):
+        """Закрити всі SWAP-позиції і зняти всі умовні ордери (стопи) на демо-рахунку."""
+        closed, cancelled = [], 0
+        try:
+            algos = self._req("GET", "/api/v5/trade/orders-algo-pending", {"instType": "SWAP", "ordType": "conditional"})
+            if algos:
+                self._req("POST", "/api/v5/trade/cancel-algos",
+                          body=[{"algoId": a["algoId"], "instId": a["instId"]} for a in algos])
+                cancelled = len(algos)
+        except OkxError as e:
+            print(f"OKX скасування стопів: {e}")
+        for p in self._req("GET", "/api/v5/account/positions", {"instType": "SWAP"}):
+            if abs(float(p.get("pos") or 0)) > 0:
+                try:
+                    self._req("POST", "/api/v5/trade/close-position", body={
+                        "instId": p["instId"], "mgnMode": p.get("mgnMode") or "cross",
+                        "posSide": p.get("posSide") or "net", "autoCxl": True})
+                    closed.append(f"{p['instId']} {p.get('posSide')}")
+                except OkxError as e:
+                    closed.append(f"{p['instId']} ⚠️ {e}")
+        return closed, cancelled
+
