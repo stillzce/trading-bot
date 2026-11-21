@@ -213,6 +213,21 @@ class OkxDemoTrader:
                         f"({self._sz(sym, sp['minSz'])} контр. = ${sp['minSz'] * sp['ctVal'] * dist:.2f} ризику)",
                         t.get("mid"))
             return
+        cut = ""
+        try:  # скільки контрактів дозволяє маржа; якщо 1% не влазить — відкриваємо менше
+            m = self._req("GET", "/api/v5/account/max-size", {"instId": sp["inst"], "tdMode": "cross"})
+            mx = float(m[0]["maxBuy" if side == "LONG" else "maxSell"]) if m else 0
+            mx = self._round_down(mx * 0.9, sp["lotSz"])
+            if sz > mx:
+                if mx < sp["minSz"]:
+                    self.notify(f"💼 Угоду не відкрито: не вистачає маржі на мінімальний лот {sp['inst']}", t.get("mid"))
+                    return
+                cut = (f"\n⚠️ Ризик урізано маржею: ${mx * sp['ctVal'] * dist:.2f} замість ${risk_usd:.2f} "
+                       f"(стоп {dist / t['entry'] * 100:.3f}% — позиція на 1% не влазить у плече)")
+                sz = mx
+        except Exception as e:
+            print(f"OKX max-size {sp['inst']}: {e}")
+        risk_usd = sz * sp["ctVal"] * dist
         try:
             d = self._req("POST", "/api/v5/trade/order", body={
                 "instId": sp["inst"], "tdMode": "cross", "side": "buy" if side == "LONG" else "sell",
@@ -234,7 +249,7 @@ class OkxDemoTrader:
             return
         notional = filled * sp["ctVal"] * avg
         self.notify(f"💼 Відкрито {side} {self._sz(sym, filled)} контр. {sp['inst']} @{avg:g} "
-                    f"(≈${notional:,.0f}) · ризик ${risk_usd:.2f} = {self.risk_pct:g}% від ${eq:,.2f} · {sl_txt}",
+                    f"(≈${notional:,.0f}) · ризик ${risk_usd:.2f} = {risk_usd / eq * 100:.2f}% від ${eq:,.2f} · {sl_txt}{cut}",
                     t.get("mid"))
 
     def on_half(self, state, t):
