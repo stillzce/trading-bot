@@ -51,7 +51,7 @@ jobs:
           OKX_DEMO_SECRET: ${{ secrets.OKX_DEMO_SECRET }}
           OKX_DEMO_PASSPHRASE: ${{ secrets.OKX_DEMO_PASSPHRASE }}
           OKX_SYMBOLS: ${{ vars.OKX_SYMBOLS }}
-          OKX_START_BALANCE: ${{ vars.OKX_START_BALANCE || '300' }}
+          OKX_START_BALANCE: ${{ vars.OKX_START_BALANCE }}
           RISK_PCT: ${{ vars.OKX_RISK_PCT }}
           OKX_LEVERAGE: ${{ vars.OKX_LEVERAGE }}
           WT_OB: ${{ vars.WT_OB }}
