@@ -1,0 +1,79 @@
+name: okx-demo
+
+# Демо-торгівля на OKX за сигналами бота. Працює 24/7.
+# Один запуск живе ~5.5 год; щогодинний розклад — страховка: новий запуск чекає в черзі,
+# поки попередній не завершиться. Стоп кожної угоди стоїть на біржі, тож пауза між запусками не страшна.
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "okx (перевірка підключення) / loop / once / test"
+        default: "okx"
+
+concurrency:
+  group: ${{ (github.event_name == 'schedule' || inputs.mode == 'loop') && 'okx-demo-loop' || format('okx-demo-{0}', github.run_id) }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      # окремий стан, щоб не змішувався з основним ботом (ключ НЕ починається з "state-")
+      - name: Відновити стан
+        uses: actions/cache/restore@v4
+        with:
+          path: state
+          key: okxdemo-${{ github.run_id }}
+          restore-keys: okxdemo-
+
+      - name: Запуск
+        env:
+          OKX_DEMO: "1"
+          TG_TOKEN: ${{ secrets.TG_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID || '280593865' }}
+          OKX_DEMO_KEY: ${{ secrets.OKX_DEMO_KEY }}
+          OKX_DEMO_SECRET: ${{ secrets.OKX_DEMO_SECRET }}
+          OKX_DEMO_PASSPHRASE: ${{ secrets.OKX_DEMO_PASSPHRASE }}
+          OKX_SYMBOLS: ${{ vars.OKX_SYMBOLS }}
+          OKX_START_BALANCE: ${{ vars.OKX_START_BALANCE }}
+          RISK_PCT: ${{ vars.OKX_RISK_PCT }}
+          OKX_LEVERAGE: ${{ vars.OKX_LEVERAGE }}
+          WT_OB: ${{ vars.WT_OB }}
+          WT_OS: ${{ vars.WT_OS }}
+          RUN_MINUTES: "330"
+        run: |
+          mkdir -p state
+          MODE="loop"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then MODE="${{ inputs.mode }}"; fi
+          python bot.py "$MODE"
+
+      # стан зберігає лише робочий цикл, щоб разова перевірка не затерла відкриті угоди
+      - name: Зберегти стан
+        if: always() && (github.event_name == 'schedule' || inputs.mode == 'loop' || inputs.mode == 'once')
+        uses: actions/cache/save@v4
+        with:
+          path: state
+          key: okxdemo-${{ github.run_id }}
+
+      - name: Не дати GitHub вимкнути розклад
+        if: always()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow enable okx-demo.yml --repo "${{ github.repository }}"

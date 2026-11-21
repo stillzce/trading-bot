@@ -49,7 +49,13 @@ def split(v):
     return [s.strip() for s in v.split(",") if s.strip()]
 
 
-SYMBOLS = split(env("SYMBOLS", "US500,NAS100,GER40,EURUSD,GBPUSD,AUDUSD,NZDUSD,XAUUSD"))
+# Демо-торгівля на OKX (окремий запуск okx-demo.yml): дані лише з OKX, угоди на демо-рахунку, працює 24/7
+OKX_DEMO = env("OKX_DEMO", "0") == "1"
+ALWAYS_ON = env("ALWAYS_ON", "1" if OKX_DEMO else "0") == "1"
+DEMO_TAG = "🧪 <b>ДЕМО OKX</b>\n" if OKX_DEMO else ""
+TRADER = None  # OkxDemoTrader, створюється в main()
+SYMBOLS = split(env("OKX_SYMBOLS", "XAUUSD,US500,NAS100,BTCUSDT,ETHUSDT,SOLUSDT") if OKX_DEMO else
+                env("SYMBOLS", "US500,NAS100,GER40,EURUSD,GBPUSD,AUDUSD,NZDUSD,XAUUSD"))
 SIGNAL_TFS = split(env("SIGNAL_TFS_V2", "1m,2m,3m,5m,15m,30m,1H,2H,4H,1D"))
 WT_N1 = int(env("WT_CHANNEL", "10"))
 WT_N2 = int(env("WT_AVERAGE", "21"))
@@ -293,7 +299,9 @@ class OkxSource:
     BASE = "https://www.okx.com/api/v5"
     CANDIDATES = {"XAUUSD": ["XAU-USDT-SWAP", "XAUT-USDT-SWAP", "XAUT-USDT"],
                   "US500": ["SPY-USDT-SWAP"], "SPX500": ["SPY-USDT-SWAP"],  # US500-USDT-SWAP неліквідний
-                  "NAS100": ["QQQ-USDT-SWAP"], "NDX100": ["QQQ-USDT-SWAP"]}
+                  "NAS100": ["QQQ-USDT-SWAP"], "NDX100": ["QQQ-USDT-SWAP"],
+                  "BTCUSDT": ["BTC-USDT-SWAP"], "ETHUSDT": ["ETH-USDT-SWAP"], "SOLUSDT": ["SOL-USDT-SWAP"]}
+    note = "OKX"
     BAR = {"1m": "1m", "5m": "5m", "15m": "15m", "30m": "30m", "1H": "1H", "4H": "4H"}
 
     def __init__(self):
@@ -313,6 +321,12 @@ class OkxSource:
 
     def has(self, symbol):
         return symbol.upper() in self.ids or "-USDT" in symbol.upper()
+
+    def min_tf(self, symbol):
+        return 1
+
+    def names(self):
+        return [f"{s} → {self.label(s)}" if self.has(s) else f"{s} → немає на OKX" for s in SYMBOLS]
 
     def label(self, symbol):
         inst = self.ids.get(symbol.upper(), symbol.upper())
@@ -444,6 +458,8 @@ def make_source():
     """Пріоритет: TradeLocker → OANDA → Yahoo. Хто перший пустив — з того й беремо дані."""
     if env("DATA_SOURCE") == "mock":
         return MockSource()
+    if OKX_DEMO:  # торгуємо на OKX — і дані беремо звідти ж, щоб входи/стопи збігались з біржею
+        return OkxSource()
     if env("DATA_SOURCE") != "yahoo":
         if env("TL_PASSWORD"):
             try:
@@ -704,6 +720,7 @@ def _mid(res):
 
 
 def send_text(text, reply_to=None):
+    text = DEMO_TAG + text
     mid = None
     for i in range(0, len(text), 4000):
         res = tg("sendMessage", {"text": text[i:i + 4000], "parse_mode": "HTML", "disable_web_page_preview": "true",
@@ -713,6 +730,7 @@ def send_text(text, reply_to=None):
 
 
 def send_photo(png, caption, reply_to=None):
+    caption = DEMO_TAG + caption
     return _mid(tg("sendPhoto", {"caption": caption[:1024], "parse_mode": "HTML", **_reply(reply_to)},
                    files={"photo": ("chart.png", png)}))
 
@@ -726,7 +744,7 @@ def send_album(items):
         files, media = {}, []
         for k, (png, cap) in enumerate(chunk):
             files[f"p{k}"] = (f"p{k}.png", png)
-            media.append({"type": "photo", "media": f"attach://p{k}", "caption": cap[:1024], "parse_mode": "HTML"})
+            media.append({"type": "photo", "media": f"attach://p{k}", "caption": (DEMO_TAG + cap)[:1024], "parse_mode": "HTML"})
         tg("sendMediaGroup", {"media": json.dumps(media, ensure_ascii=False)}, files)
 
 
@@ -1259,6 +1277,11 @@ def open_trade(state, sym, side, tf, entry, stop, t_open, mid, grade_icon, silen
         ts_open=str(t_open), t_last=str(t_open), mid=mid, half=None, one_r=False, grade=grade_icon, silent=bool(silent),
         tp_half=float(tp_half) if tp_half is not None else None,
         date=datetime.now(LOCAL_TZ).strftime("%Y-%m-%d")))
+    if TRADER is not None and not silent:
+        try:
+            TRADER.on_open(state, state["trades"][-1])
+        except Exception as e:
+            print(f"OKX вхід {sym}: {e}")
 
 
 def reentry_of(state, sym, side):
@@ -1286,6 +1309,11 @@ def _first_opp(df, tf, opp, after):
 
 
 def _close_trade(state, t, total, how, when):
+    if TRADER is not None and t.get("okx"):
+        try:
+            TRADER.on_close(state, t, how)
+        except Exception as e:
+            print(f"OKX закриття {t['sym']}: {e}")
     t.update(total=round(total, 2), how=how, t_close=f"{when.tz_convert(LOCAL_TZ):%H:%M}",
              close_date=when.tz_convert(LOCAL_TZ).strftime("%Y-%m-%d"))
     state.setdefault("journal", []).append(t)
@@ -1392,6 +1420,11 @@ def manage_trades(cache, ctx, state, first=False):
                         else f"{TF_LABEL[t['tf']]} {opp_txt}")
             send_text(f"💰 {label}: {why_half} о {wl} — фіксуй ½ @{fmt(px)} ({r:+.1f}R). "
                       f"Стоп у БУ {fmt(t['entry'])}. Решта — до протилежного сигналу {TF_LABEL[t['xtf']]}", t["mid"])
+            if TRADER is not None and t.get("okx"):
+                try:
+                    TRADER.on_half(state, t)
+                except Exception as e:
+                    print(f"OKX ½ {sym}: {e}")
 
 
 def close_all_eod(cache, state):
@@ -1460,7 +1493,7 @@ def send_daily_summary(state):
             lines.append(f"{'✅' if j['total'] > 0 else '◻️' if j['total'] == 0 else '❌'} {j['grade']} {j['sym']} "
                          f"{j['side']} {TF_LABEL[j['tf']]} {j['t_open']}→{j['t_close']}: {j['total']:+.1f}R ({j['how']})")
     if opened:
-        lines.append("\nВідкриті (закриються в кінці дня):")
+        lines.append("\nВідкриті (тримаються далі):" if ALWAYS_ON else "\nВідкриті (закриються в кінці дня):")
         for t in opened:
             lines.append(f"• {t['grade']} {t['sym']} {t['side']} {TF_LABEL[t['tf']]} з {t['t_open']}"
                          + (f", ½ зафіксовано {t['half']:+.1f}R" if t["half"] is not None else ""))
@@ -1468,7 +1501,19 @@ def send_daily_summary(state):
         st = sum(j["total"] for j in skipped)
         lines.append(f"\n⛔ Пропущені через FVG-стіну: {len(skipped)} · у плюсі {sum(1 for j in skipped if j['total'] > 0)}"
                      f" · віртуально разом {st:+.1f}R")
-    lines.append("\n<i>Це віртуальний супровід за правилами, не реальні угоди.</i>")
+    if OKX_DEMO:
+        real = [j for j in done if j.get("okx", {}).get("pnl") is not None]
+        if real:
+            pnl = sum(j["okx"]["pnl"] for j in real)
+            fee = sum(j["okx"].get("fee", 0) for j in real)
+            lines.append(f"\n💼 <b>Демо-рахунок OKX</b>: {len(real)} угод · {'+' if pnl >= 0 else '−'}${abs(pnl):.2f} "
+                         f"(комісії ${abs(fee):.2f})")
+        start = float(env("OKX_START_BALANCE", "1000"))
+        eq = float(state.get("okx_equity", start))
+        lines.append(f"Баланс: ${eq:,.2f} (старт ${start:,.0f}, {(eq / start - 1) * 100:+.1f}%)")
+        lines.append("\n<i>R — віртуальний супровід за правилами; $ — реальні угоди на демо-рахунку OKX.</i>")
+    else:
+        lines.append("\n<i>Це віртуальний супровід за правилами, не реальні угоди.</i>")
     send_text("\n".join(lines))
 
 
@@ -1477,7 +1522,47 @@ def local_dt(hhmm, base):
     return base.replace(hour=h, minute=m, second=0, microsecond=0)
 
 
+def run_loop_always(src):
+    """24/7 (демо OKX): без вихідних і без закриття угод на ніч. Контекст оновлюється з новою добою,
+    підсумок дня — о SUMMARY_AT (за замовчуванням 23:55 Київ)."""
+    deadline = datetime.now(LOCAL_TZ) + timedelta(minutes=RUN_MINUTES)
+    summary_at = env("SUMMARY_AT", "23:55")
+    cache = BarCache(src)
+    state = load_state()
+    ctx, day = {}, None
+    first = True
+    while datetime.now(LOCAL_TZ) < deadline:
+        now = datetime.now(LOCAL_TZ)
+        today = now.strftime("%Y-%m-%d")
+        if day != today:  # нова доба (або старт) — перерахувати контекст
+            ctx, errors = build_contexts(cache)
+            day = today
+            if state.get("morning") != today:
+                send_morning(ctx, errors, getattr(src, "note", ""))
+                state["morning"] = today
+                save_state(state)
+        try:
+            check_cycle(cache, ctx, state, first)
+        except Exception as e:
+            print(f"Помилка циклу: {e}")
+        try:
+            manage_trades(cache, ctx, state, first)
+            check_warnings(state)
+            if now >= local_dt(summary_at, now) and state.get("summary") != today:
+                send_daily_summary(state)
+                state["summary"] = today
+        except Exception as e:
+            print(f"Помилка супроводу: {e}")
+        save_state(state)
+        first = False
+        t = time.time()
+        time.sleep(max(1.0, 60 - (t % 60) + 5))
+    print(f"Завершую о {datetime.now(LOCAL_TZ):%H:%M}.")
+
+
 def run_loop(src):
+    if ALWAYS_ON:
+        return run_loop_always(src)
     now = datetime.now(LOCAL_TZ)
     start, end = local_dt(WORK_START, now), local_dt(WORK_END, now)
     if now.weekday() >= 5 or now >= end:
@@ -1656,6 +1741,29 @@ def main():
         send_text("✅ Бот на зв'язку")
         return
     src = make_source()
+    if OKX_DEMO and mode in ("loop", "once", "okx"):
+        global TRADER
+        from okx_trader import OkxDemoTrader
+        inst = {s: src.ids[s] for s in SYMBOLS if s in getattr(src, "ids", {})}
+        if not env("OKX_DEMO_KEY"):
+            print("Секрети OKX_DEMO_* ще не додані — демо-бот не запускається.")
+            return
+        try:
+            TRADER = OkxDemoTrader(inst, notify=lambda text, reply_to=None: send_text(text, reply_to))
+        except Exception as e:
+            send_text(f"⚠️ Не вдалося підключитись до демо-рахунку OKX: {e}\n"
+                      f"Спробую знову з наступним запуском (щогодини).")
+            return
+        if TRADER is not None:
+            st = load_state()
+            if mode == "okx" or not st.get("okx_hello"):
+                eq = TRADER.equity(st)
+                send_text(f"💼 <b>Підключено демо-рахунок OKX</b>\nБаланс бота: ${eq:,.2f} · ризик {TRADER.risk_pct:g}% "
+                          f"на угоду (компаунд) · плече до {TRADER.leverage}x\nІнструменти:\n" + "\n".join(TRADER.status_lines()))
+                st["okx_hello"] = True
+                save_state(st)
+        if mode == "okx":
+            return
     if mode == "symbols":
         names = src.names()
         print("\n".join(names))
