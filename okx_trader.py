@@ -6,8 +6,8 @@
   • ½ закривається там же, де віртуальна угода фіксує ½, після цього стоп переноситься в беззбиток;
   • решта закривається на виході / стопі / за часом.
 
-Розмір позиції: RISK_PCT % від віртуального балансу (старт OKX_START_BALANCE, за замовчуванням $1000).
-Баланс після кожної угоди змінюється на реальний PnL з OKX (з комісіями) — тобто компаунд.
+Розмір позиції: RISK_PCT % від реального балансу USDT на демо-рахунку (береться з OKX перед кожною угодою) —
+тобто компаунд. Якщо задано OKX_START_BALANCE — замість цього віртуальний баланс від цієї суми + реальний PnL.
 
 Секрети: OKX_DEMO_KEY, OKX_DEMO_SECRET, OKX_DEMO_PASSPHRASE.
 """
@@ -44,7 +44,8 @@ class OkxDemoTrader:
             raise OkxError("не задані секрети OKX_DEMO_KEY / OKX_DEMO_SECRET / OKX_DEMO_PASSPHRASE")
         self.s = session or requests.Session()
         self.notify = notify
-        self.start_balance = float(start_balance if start_balance is not None else _env("OKX_START_BALANCE", "1000"))
+        sb = start_balance if start_balance is not None else _env("OKX_START_BALANCE")
+        self.start_balance = float(sb) if sb else None  # None — працюємо від реального балансу USDT
         self.risk_pct = float(risk_pct if risk_pct is not None else _env("RISK_PCT", "1"))
         self.leverage = int(leverage if leverage is not None else _env("OKX_LEVERAGE", "20"))
         self.inst_map = dict(inst_map)
@@ -139,8 +140,27 @@ class OkxDemoTrader:
     def _sz(self, sym, sz):
         return self._fmt_num(sz, self.specs[sym]["lotSz"])
 
+    def account_usdt(self):
+        d = self._req("GET", "/api/v5/account/balance", {"ccy": "USDT"})
+        for x in (d[0].get("details") or []) if d else []:
+            if x.get("ccy") == "USDT":
+                return float(x.get("eq") or x.get("cashBal") or 0)
+        return 0.0
+
     def equity(self, state):
-        return float(state.get("okx_equity", self.start_balance))
+        """Баланс, від якого рахується ризик. Перший виклик запам'ятовує стартову суму (okx_start)."""
+        if self.start_balance is not None:
+            eq = float(state.get("okx_equity", self.start_balance))
+            state.setdefault("okx_start", self.start_balance)
+            return eq
+        try:
+            eq = self.account_usdt()
+            state["okx_equity"] = round(eq, 4)
+        except Exception as e:
+            print(f"OKX баланс: {e}")
+            eq = float(state.get("okx_equity", 0))
+        state.setdefault("okx_start", round(eq, 2))
+        return eq
 
     def _order_fill(self, inst, ord_id):
         for _ in range(6):
@@ -185,6 +205,9 @@ class OkxDemoTrader:
         if dist <= 0:
             return
         sz = self._round_down(risk_usd / (dist * sp["ctVal"]), sp["lotSz"])
+        if risk_usd <= 0:
+            self.notify(f"💼 Угоду не відкрито: на демо-рахунку немає USDT", t.get("mid"))
+            return
         if sz < sp["minSz"]:
             self.notify(f"💼 Угоду не відкрито: ризик ${risk_usd:.2f} замалий для мінімального лота {sp['inst']} "
                         f"({self._sz(sym, sp['minSz'])} контр. = ${sp['minSz'] * sp['ctVal'] * dist:.2f} ризику)",
@@ -265,9 +288,11 @@ class OkxDemoTrader:
             self._cancel_sl(sym, info.get("algo"))
         time.sleep(1.5)
         pnl, fee = self._realized(inst, side, info["ts"])
-        eq0 = self.equity(state)
-        eq1 = eq0 + pnl
-        state["okx_equity"] = round(eq1, 4)
+        if self.start_balance is not None:
+            eq1 = self.equity(state) + pnl
+            state["okx_equity"] = round(eq1, 4)
+        else:
+            eq1 = self.equity(state)
         info.update(pnl=round(pnl, 4), fee=round(fee, 4))
         r_real = pnl / info["risk"] if info.get("risk") else 0
         self.notify(f"💼 Закрито {inst} {side} ({how}): {'+' if pnl >= 0 else '−'}${abs(pnl):.2f} "

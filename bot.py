@@ -1508,9 +1508,11 @@ def send_daily_summary(state):
             fee = sum(j["okx"].get("fee", 0) for j in real)
             lines.append(f"\n💼 <b>Демо-рахунок OKX</b>: {len(real)} угод · {'+' if pnl >= 0 else '−'}${abs(pnl):.2f} "
                          f"(комісії ${abs(fee):.2f})")
-        start = float(env("OKX_START_BALANCE", "1000"))
-        eq = float(state.get("okx_equity", start))
-        lines.append(f"Баланс: ${eq:,.2f} (старт ${start:,.0f}, {(eq / start - 1) * 100:+.1f}%)")
+        if TRADER is not None:
+            TRADER.equity(state)
+        eq = float(state.get("okx_equity", 0))
+        start = float(state.get("okx_start") or eq or 1)
+        lines.append(f"Баланс USDT: ${eq:,.2f} (старт ${start:,.2f}, {(eq / start - 1) * 100:+.1f}%)")
         lines.append("\n<i>R — віртуальний супровід за правилами; $ — реальні угоди на демо-рахунку OKX.</i>")
     else:
         lines.append("\n<i>Це віртуальний супровід за правилами, не реальні угоди.</i>")
@@ -1758,7 +1760,8 @@ def main():
             st = load_state()
             if mode == "okx" or not st.get("okx_hello"):
                 eq = TRADER.equity(st)
-                send_text(f"💼 <b>Підключено демо-рахунок OKX</b>\nБаланс бота: ${eq:,.2f} · ризик {TRADER.risk_pct:g}% "
+                send_text(f"💼 <b>Підключено демо-рахунок OKX</b>\nБаланс USDT: ${eq:,.2f} (старт ${st.get('okx_start', eq):,.2f})"
+                          f" · ризик {TRADER.risk_pct:g}% = ${eq * TRADER.risk_pct / 100:,.2f} "
                           f"на угоду (компаунд) · плече до {TRADER.leverage}x\nІнструменти:\n" + "\n".join(TRADER.status_lines()))
                 st["okx_hello"] = True
                 save_state(st)
