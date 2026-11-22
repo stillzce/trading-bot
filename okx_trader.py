@@ -170,13 +170,37 @@ class OkxDemoTrader:
             time.sleep(0.5)
         raise OkxError("ордер не виконався")
 
-    def _place_sl(self, sym, side, stop):
+    def _mark(self, sym):
+        d = self._req("GET", "/api/v5/public/mark-price", {"instType": "SWAP", "instId": self.specs[sym]["inst"]},
+                      auth=False)
+        return float(d[0]["markPx"])
+
+    def _order_info(self, inst, ord_id):
+        """(середня ціна, виконано контрактів, комісія ≤ 0) по ордеру."""
+        for _ in range(8):
+            d = self._req("GET", "/api/v5/trade/order", {"instId": inst, "ordId": ord_id})
+            if d and d[0].get("state") == "filled":
+                return float(d[0]["avgPx"]), float(d[0]["accFillSz"]), float(d[0].get("fee") or 0)
+            time.sleep(0.5)
+        raise OkxError("ордер не виконався")
+
+    def _market(self, sym, side, opening, sz):
+        """Ринковий ордер на sz контрактів; opening=False — закриття частини позиції side."""
         sp = self.specs[sym]
-        close_side = "sell" if side == "LONG" else "buy"
+        buy = (side == "LONG") == opening
+        d = self._req("POST", "/api/v5/trade/order", body={
+            "instId": sp["inst"], "tdMode": "cross", "side": "buy" if buy else "sell",
+            "posSide": side.lower(), "ordType": "market", "sz": self._sz(sym, sz)})
+        return self._order_info(sp["inst"], d[0]["ordId"])
+
+    def _place_sl(self, sym, side, stop, sz):
+        """Стоп саме на обсяг цієї угоди (а не на всю позицію) — щоб кілька угод в один бік жили незалежно.
+        Тригер — mark price: вона йде за реальним ринком, а не за тонким стаканом демо-рахунку."""
+        sp = self.specs[sym]
         d = self._req("POST", "/api/v5/trade/order-algo", body={
-            "instId": sp["inst"], "tdMode": "cross", "side": close_side, "posSide": side.lower(),
-            "ordType": "conditional", "slTriggerPx": self._px(sym, stop), "slOrdPx": "-1",
-            "slTriggerPxType": "last", "closeFraction": "1", "reduceOnly": "true"})
+            "instId": sp["inst"], "tdMode": "cross", "side": "sell" if side == "LONG" else "buy",
+            "posSide": side.lower(), "ordType": "conditional", "sz": self._sz(sym, sz),
+            "slTriggerPx": self._px(sym, stop), "slOrdPx": "-1", "slTriggerPxType": "mark"})
         return d[0]["algoId"]
 
     def _cancel_sl(self, sym, algo_id):
@@ -191,26 +215,39 @@ class OkxDemoTrader:
         d = self._req("GET", "/api/v5/account/positions", {"instType": "SWAP", "instId": self.specs[sym]["inst"]})
         return sum(abs(float(p.get("pos") or 0)) for p in d if p.get("posSide") == side.lower())
 
+    def _book(self, sym, info, side, px, done, fee):
+        """Записати закриття частини угоди: PnL цієї частини від ціни входу цієї угоди + комісія."""
+        sg = 1 if side == "LONG" else -1
+        info["pnl_acc"] = info.get("pnl_acc", 0.0) + sg * (px - info["avg"]) * done * self.specs[sym]["ctVal"]
+        info["fee_acc"] = info.get("fee_acc", 0.0) + fee
+        info["left"] = max(0.0, round(info["left"] - done, 8))
+
     # ------------------------------------------------------------------ події угоди
 
     def on_open(self, state, t):
-        """Відкрити реальну позицію під віртуальну угоду t (з bot.open_trade)."""
+        """Відкрити реальну позицію під віртуальну угоду t (з bot.open_trade). Кожна угода — окремий обсяг і окремий стоп,
+        навіть якщо в цей бік уже є позиція (добір)."""
         sym, side = t["sym"], t["side"]
         if not self.can_trade(sym):
             return
         sp = self.specs[sym]
         eq = self.equity(state)
         risk_usd = eq * self.risk_pct / 100
-        dist = abs(t["entry"] - t["stop"])
-        if dist <= 0:
-            return
-        sz = self._round_down(risk_usd / (dist * sp["ctVal"]), sp["lotSz"])
         if risk_usd <= 0:
-            self.notify(f"💼 Угоду не відкрито: на демо-рахунку немає USDT", t.get("mid"))
+            self.notify("💼 Угоду не відкрито: на демо-рахунку немає USDT", t.get("mid"))
             return
+        try:  # розмір — від поточної ціни, а не від ціни сигналу: вхід міг статися пізніше
+            ref = self._mark(sym)
+        except Exception as e:
+            print(f"OKX mark {sp['inst']}: {e}")
+            ref = t["entry"]
+        if (side == "LONG" and ref <= t["stop"]) or (side == "SHORT" and ref >= t["stop"]):
+            self.notify(f"💼 Угоду не відкрито: ціна {ref:g} вже за стопом {self._px(sym, t['stop'])}", t.get("mid"))
+            return
+        dist = abs(ref - t["stop"])
+        sz = self._round_down(risk_usd / (dist * sp["ctVal"]), sp["lotSz"])
         if sz < sp["minSz"]:
-            self.notify(f"💼 Угоду не відкрито: ризик ${risk_usd:.2f} замалий для мінімального лота {sp['inst']} "
-                        f"({self._sz(sym, sp['minSz'])} контр. = ${sp['minSz'] * sp['ctVal'] * dist:.2f} ризику)",
+            self.notify(f"💼 Угоду не відкрито: ризик ${risk_usd:.2f} замалий для мінімального лота {sp['inst']}",
                         t.get("mid"))
             return
         cut = ""
@@ -222,38 +259,36 @@ class OkxDemoTrader:
                 if mx < sp["minSz"]:
                     self.notify(f"💼 Угоду не відкрито: не вистачає маржі на мінімальний лот {sp['inst']}", t.get("mid"))
                     return
-                cut = (f"\n⚠️ Ризик урізано маржею: ${mx * sp['ctVal'] * dist:.2f} замість ${risk_usd:.2f} "
-                       f"(стоп {dist / t['entry'] * 100:.3f}% — позиція на 1% не влазить у плече)")
+                cut = f"\n⚠️ Ризик урізано маржею (стоп {dist / ref * 100:.3f}% — 1% не влазить у плече)"
                 sz = mx
         except Exception as e:
             print(f"OKX max-size {sp['inst']}: {e}")
-        risk_usd = sz * sp["ctVal"] * dist
+        adds = [x for x in state.get("trades", []) if x is not t and x["sym"] == sym and x["side"] == side
+                and x.get("okx") and not x["okx"].get("closed")]
         try:
-            d = self._req("POST", "/api/v5/trade/order", body={
-                "instId": sp["inst"], "tdMode": "cross", "side": "buy" if side == "LONG" else "sell",
-                "posSide": side.lower(), "ordType": "market", "sz": self._sz(sym, sz)})
-            avg, filled = self._order_fill(sp["inst"], d[0]["ordId"])
+            avg, filled, fee = self._market(sym, side, True, sz)
         except Exception as e:
             self.notify(f"💼 ⚠️ Помилка входу {sp['inst']}: {e}", t.get("mid"))
             return
-        ts = int(time.time() * 1000) - 5000
-        info = dict(inst=sp["inst"], sz=filled, left=filled, avg=avg, ts=ts, risk=risk_usd, eq=eq, algo=None)
+        real_risk = abs(avg - t["stop"]) * filled * sp["ctVal"]
+        info = dict(inst=sp["inst"], sz=filled, left=filled, avg=avg, ts=int(time.time() * 1000) - 5000,
+                    risk=real_risk, eq=eq, algo=None, pnl_acc=0.0, fee_acc=fee, v=2)
         t["okx"] = info
         try:
-            info["algo"] = self._place_sl(sym, side, t["stop"])
-            sl_txt = f"стоп на біржі {self._px(sym, t['stop'])}"
+            info["algo"] = self._place_sl(sym, side, t["stop"], filled)
+            sl_txt = f"стоп {self._px(sym, t['stop'])} на {self._sz(sym, filled)} контр."
         except Exception as e:
-            sl_txt = f"⚠️ стоп НЕ поставлено ({e}) — закриваю"
-            self.notify(f"💼 {sp['inst']} {side}: {sl_txt}", t.get("mid"))
+            self.notify(f"💼 {sp['inst']} {side}: ⚠️ стоп НЕ поставлено ({e}) — закриваю цю угоду", t.get("mid"))
             self.on_close(state, t, "стоп не встановлено")
             return
-        notional = filled * sp["ctVal"] * avg
+        add_txt = (f"\n➕ Добір: у позиції {side} тепер {len(adds) + 1} угоди, у кожної свій стоп і вихід"
+                   if adds else "")
         self.notify(f"💼 Відкрито {side} {self._sz(sym, filled)} контр. {sp['inst']} @{avg:g} "
-                    f"(≈${notional:,.0f}) · ризик ${risk_usd:.2f} = {risk_usd / eq * 100:.2f}% від ${eq:,.2f} · {sl_txt}{cut}",
-                    t.get("mid"))
+                    f"(≈${filled * sp['ctVal'] * avg:,.0f}) · ризик ${real_risk:.2f} = {real_risk / eq * 100:.2f}% "
+                    f"від ${eq:,.2f} · {sl_txt}{cut}{add_txt}", t.get("mid"))
 
     def on_half(self, state, t):
-        """Зафіксувати ½ і перенести стоп у беззбиток."""
+        """Зафіксувати ½ ОБСЯГУ ЦІЄЇ угоди і перенести її стоп у беззбиток (ціна її входу)."""
         info = t.get("okx")
         if not info or info.get("closed"):
             return
@@ -265,26 +300,48 @@ class OkxDemoTrader:
         msg = []
         if half >= sp["minSz"]:
             try:
-                d = self._req("POST", "/api/v5/trade/order", body={
-                    "instId": sp["inst"], "tdMode": "cross", "side": "sell" if side == "LONG" else "buy",
-                    "posSide": side.lower(), "ordType": "market", "sz": self._sz(sym, half)})
-                px, done = self._order_fill(sp["inst"], d[0]["ordId"])
-                info["left"] = max(0.0, info["left"] - done)
-                msg.append(f"закрито ½ ({self._sz(sym, done)} контр.) @{px:g}")
+                px, done, fee = self._market(sym, side, False, half)
+                self._book(sym, info, side, px, done, fee)
+                msg.append(f"закрито ½ угоди ({self._sz(sym, done)} контр.) @{px:g}")
             except Exception as e:
                 msg.append(f"⚠️ ½ не закрито: {e}")
         else:
-            msg.append("½ не ділиться (мінімальний лот) — тримаю всю позицію")
+            msg.append("½ не ділиться (мінімальний лот) — тримаю весь обсяг угоди")
         try:
             self._cancel_sl(sym, info.get("algo"))
-            info["algo"] = self._place_sl(sym, side, info["avg"])
-            msg.append(f"стоп у БУ {self._px(sym, info['avg'])}")
+            info["algo"] = None
+            if info["left"] > 0:
+                info["algo"] = self._place_sl(sym, side, info["avg"], info["left"])
+                msg.append(f"стоп у БУ {self._px(sym, info['avg'])} на {self._sz(sym, info['left'])} контр.")
         except Exception as e:
             msg.append(f"⚠️ стоп у БУ не перенесено: {e}")
         self.notify("💼 " + " · ".join(msg), t.get("mid"))
 
+    def check_stop(self, state, t):
+        """Чи спрацював на біржі стоп цієї угоди. Якщо так — записує результат і повертає ціну виконання."""
+        info = t.get("okx")
+        if not info or info.get("closed") or not info.get("algo") or info.get("v") != 2:
+            return None
+        sym, side = t["sym"], t["side"]
+        if sym not in self.specs:
+            return None
+        d = self._req("GET", "/api/v5/trade/order-algo", {"algoId": info["algo"]})
+        if not d or d[0].get("state") != "effective":
+            return None
+        ord_id = d[0].get("ordId") or (d[0].get("ordIdList") or [None])[0]
+        px = float(d[0].get("actualPx") or 0) or None
+        try:
+            if ord_id:
+                px, done, fee = self._order_info(info["inst"], ord_id)
+                self._book(sym, info, side, px, done, fee)
+        except Exception as e:
+            print(f"OKX стоп-ордер {ord_id}: {e}")
+        info["algo"] = None
+        info["stopped"] = True
+        return px if px is not None else t["stop"]
+
     def on_close(self, state, t, how=""):
-        """Закрити залишок на біржі (якщо ще є), порахувати реальний PnL з комісіями, оновити баланс."""
+        """Закрити залишок САМЕ ЦІЄЇ угоди (інші угоди в позиції не чіпаємо), порахувати її PnL, оновити баланс."""
         info = t.get("okx")
         if not info or info.get("closed"):
             return
@@ -293,16 +350,29 @@ class OkxDemoTrader:
         inst = info["inst"]
         info["closed"] = True
         err = ""
-        try:
-            if sp and self._position_sz(sym, side) > 0:
-                self._req("POST", "/api/v5/trade/close-position",
-                          body={"instId": inst, "mgnMode": "cross", "posSide": side.lower(), "autoCxl": True})
-        except Exception as e:
-            err = f" · ⚠️ закриття: {e}"
         if sp:
             self._cancel_sl(sym, info.get("algo"))
-        time.sleep(1.5)
-        pnl, fee = self._realized(inst, side, info["ts"])
+            info["algo"] = None
+        if info.get("v") != 2:  # угоди, відкриті старою версією (стоп на всю позицію)
+            try:
+                if sp and self._position_sz(sym, side) > 0 and info.get("left", 0) > 0:
+                    px, done, fee = self._market(sym, side, False, min(info["left"], self._position_sz(sym, side)))
+            except Exception as e:
+                err = f" · ⚠️ закриття: {e}"
+            time.sleep(1.5)
+            pnl, fee = self._realized(inst, side, info["ts"])
+        else:
+            try:
+                if sp and info["left"] > 0 and not info.get("stopped"):
+                    pos = self._position_sz(sym, side)
+                    q = self._round_down(min(info["left"], pos), sp["lotSz"])
+                    if q > 0:
+                        px, done, fee_c = self._market(sym, side, False, q)
+                        self._book(sym, info, side, px, done, fee_c)
+            except Exception as e:
+                err = f" · ⚠️ закриття: {e}"
+            fee = info.get("fee_acc", 0.0)
+            pnl = info.get("pnl_acc", 0.0) + fee
         if self.start_balance is not None:
             eq1 = self.equity(state) + pnl
             state["okx_equity"] = round(eq1, 4)
@@ -312,6 +382,30 @@ class OkxDemoTrader:
         r_real = pnl / info["risk"] if info.get("risk") else 0
         self.notify(f"💼 Закрито {inst} {side} ({how}): {'+' if pnl >= 0 else '−'}${abs(pnl):.2f} "
                     f"({r_real:+.2f}R реально, комісії ${abs(fee):.2f}) · баланс ${eq1:,.2f}{err}", t.get("mid"))
+
+    def migrate(self, state):
+        """Перевести угоди старої версії (стоп closeFraction на всю позицію) на окремі стопи по обсягу угоди."""
+        out = []
+        for t in state.get("trades", []):
+            info = t.get("okx")
+            if not info or info.get("closed") or info.get("v") == 2 or t["sym"] not in self.specs:
+                continue
+            sym, side = t["sym"], t["side"]
+            tot, fee = self._realized(info["inst"], side, info["ts"])  # що вже зафіксовано (½) + комісії
+            info["pnl_acc"], info["fee_acc"] = tot - fee, fee
+            pos = self._position_sz(sym, side)
+            info["left"] = min(info.get("left", 0), pos)
+            self._cancel_sl(sym, info.get("algo"))
+            info["algo"] = None
+            info["v"] = 2
+            if info["left"] <= 0:
+                info["stopped"] = True  # позиції вже немає (стоп спрацював на біржі)
+                out.append(f"{info['inst']} {side}: позиції вже немає на біржі")
+                continue
+            stop = info["avg"] if t.get("half") is not None else t["stop"]
+            info["algo"] = self._place_sl(sym, side, stop, info["left"])
+            out.append(f"{info['inst']} {side}: стоп {self._px(sym, stop)} на {self._sz(sym, info['left'])} контр.")
+        return out
 
     def _realized(self, inst, side, since_ms):
         """Сума fillPnl + fee по угодах цієї позиції з моменту входу."""

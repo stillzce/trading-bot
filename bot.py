@@ -54,6 +54,9 @@ OKX_DEMO = env("OKX_DEMO", "0") == "1"
 ALWAYS_ON = env("ALWAYS_ON", "1" if OKX_DEMO else "0") == "1"
 DEMO_TAG = "🧪 <b>ДЕМО OKX</b>\n" if OKX_DEMO else ""
 TRADER = None  # OkxDemoTrader, створюється в main()
+# Добір: новий сигнал у той самий бік відкриває ще одну окрему угоду (свій стоп, своя ½, свій вихід), до MAX_SAME на актив/бік
+ALLOW_ADD = env("ALLOW_ADD", "1" if OKX_DEMO else "0") == "1"
+MAX_SAME = int(env("MAX_SAME", "3"))
 SYMBOLS = split(env("OKX_SYMBOLS", "BTCUSDT,ETHUSDT,SOLUSDT") if OKX_DEMO else
                 env("SYMBOLS", "US500,NAS100,GER40,EURUSD,GBPUSD,AUDUSD,NZDUSD,XAUUSD"))
 SIGNAL_TFS = split(env("SIGNAL_TFS_V2", "1m,2m,3m,5m,15m,30m,1H,2H,4H,1D"))
@@ -886,7 +889,7 @@ def check_cycle(cache, ctx, state, first=False):
                         if key in sent:
                             continue
                         sent.append(key)
-                        if find_open(state, sym, cside):
+                        if blocks_new(state, sym, cside):
                             continue
                         price = float(df["close"].iloc[i])
                         d_atr, wtxt, _ = fvg_against(cache, sym, cside, price, tf)
@@ -998,7 +1001,7 @@ def check_armed(cache, sym, c, state):
         )
         png = chart(m1, f"{sym} · {TF_LABEL[base]} · {side} · розворот?", c["pdh"], c["pdl"], mark=side)
         mid = send_photo(png, caption)
-        if not find_open(state, sym, side):
+        if not blocks_new(state, sym, side):
             open_trade(state, sym, side, conf_tf, close5, stop, m5.index[-1] + pd.Timedelta(minutes=TF_MIN[conf_tf]),
                        mid, "⚡", silent=blocked)
 
@@ -1112,7 +1115,8 @@ def send_signal(sym, c, hits, side, kind, cache=None, state=None):
     stop = None
     if state is not None and tf_top != "1D":
         stop, r_txt = plan_stop(sym, side, price, ext_top)
-        open_same = find_open(state, sym, side)
+        open_same = blocks_new(state, sym, side)
+        adding = open_same_side(state, sym, side) if open_same is None else []
         blocked = False
         tp_half = None
         wall_txt = ""
@@ -1130,9 +1134,12 @@ def send_signal(sym, c, hits, side, kind, cache=None, state=None):
                 wall_txt += "\n🛡 Проп-режим (за бажанням): беззбиток на +1R"
         if open_same:
             caption += (f"\nℹ️ Угода {side} з {open_same['t_open']} ще відкрита — це підтвердження/добір, "
-                        f"нову не відкриваю.")
+                        f"нову не відкриваю" + (f" (вже {MAX_SAME} угоди в цей бік)." if ALLOW_ADD else "."))
             stop = None
         else:
+            if adding:
+                caption += (f"\n➕ <b>Добір</b> до {side} з " + ", ".join(t['t_open'] for t in adding) +
+                            " — окрема угода: свій обсяг, свій стоп, своя ½ і вихід")
             caption += ("\n" + wall_txt if wall_txt else "") + (f"\n📐 Вхід {fmt(price)} · Стоп {fmt(stop)} (за {"дном" if long_ else "вершиною"}) · 1R = {r_txt}\n"
                         f"Вихід: ½ — {'FVG проти або ' if tp_half is not None else ''}протилежний сигнал {TF_LABEL[tf_top]}"
                         f"{' (що раніше)' if tp_half is not None else ''}, ½ — протилежний {TF_LABEL[EXIT_TF[tf_top]]}")
@@ -1289,6 +1296,20 @@ def find_open(state, sym, side):
                  and not t.get("silent")), None)
 
 
+def open_same_side(state, sym, side):
+    return [t for t in state.get("trades", []) if t["sym"] == sym and t["side"] == side and not t.get("silent")]
+
+
+def blocks_new(state, sym, side):
+    """Угода, через яку НЕ відкривати нову в цей бік (None — можна відкривати). З добором — лише коли вже MAX_SAME."""
+    same = open_same_side(state, sym, side)
+    if not same:
+        return None
+    if ALLOW_ADD and len(same) < MAX_SAME:
+        return None
+    return same[0]
+
+
 def open_trade(state, sym, side, tf, entry, stop, t_open, mid, grade_icon, silent=False, tp_half=None):
     t_open = pd.Timestamp(t_open)
     state.setdefault("trades", []).append(dict(
@@ -1357,6 +1378,19 @@ def manage_trades(cache, ctx, state, first=False):
         opp = "SHORT" if long_ else "LONG"
         opp_txt = "вийшов з вершини" if long_ else "вийшов із дна"
         label = f"{'🟢' if long_ else '🔴'} {sym} {side} {TF_LABEL[t['tf']]} ({t['t_open']})"
+        if TRADER is not None and t.get("okx") and not t["okx"].get("closed"):
+            try:
+                xpx = TRADER.check_stop(state, t)
+            except Exception as e:
+                print(f"OKX перевірка стопу {sym}: {e}")
+                xpx = None
+            if xpx is not None:  # стоп спрацював на біржі — закриваємо і віртуальну угоду, щоб не розходились
+                r = sg * (t["stop"] - t["entry"]) / t["R"]
+                total = (t["half"] + r) / 2 if t["half"] is not None else r
+                send_text(f"🛑 {label}: стоп спрацював на біржі OKX @{fmt(xpx)} — закриваю і віртуальну "
+                          f"({r:+.1f}R). Разом {total:+.1f}R", t["mid"])
+                _close_trade(state, t, total, "стоп (біржа)", now)
+                continue
         try:
             base = base_tf(cache, sym)
             m = cache.get(sym, base)
@@ -1800,6 +1834,15 @@ def main():
             send_text("🧹 <b>Тест з нуля</b>: закрито позицій — " + (", ".join(closed) if closed else "0") +
                       f"; знято стопів — {n}")
             return
+        if TRADER is not None and mode in ("loop", "once"):
+            st = load_state()
+            try:
+                mig = TRADER.migrate(st)
+                if mig:
+                    send_text("💼 Відкриті угоди переведено на окремі стопи (під добір):\n" + "\n".join(mig))
+                save_state(st)
+            except Exception as e:
+                print(f"OKX міграція: {e}")
         if TRADER is not None:
             st = load_state()
             if mode == "okx" or not st.get("okx_hello"):
