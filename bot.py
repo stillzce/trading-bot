@@ -18,7 +18,7 @@ import json
 import os
 import sys
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -527,10 +527,25 @@ def wavetrend(df):
     return wt1, wt1.rolling(4).mean()
 
 
-def daily_sessions(h1):
-    """Денні свічки з H1, закриття о 17:00 NY. Індекс — час відкриття сесії (UTC). Лише завершені."""
+def is_crypto(sym):
+    return sym.upper().endswith("USDT") or "-USDT" in sym.upper()
+
+
+CRYPTO_ONLY = bool(SYMBOLS) and all(is_crypto(s) for s in SYMBOLS)
+
+
+def daily_sessions(h1, crypto=False):
+    """Денні свічки з H1, закриття о 17:00 NY. Індекс — час відкриття сесії (UTC). Лише завершені.
+    crypto=True: доба 00:00–24:00 UTC (02:00 Київ взимку), як на OKX, і з вихідними — крипта торгується 7 днів."""
     if h1.empty:
         return h1
+    if crypto:
+        key = h1.index.tz_convert("UTC").floor("D")
+        days = h1.groupby(key).agg(open=("open", "first"), high=("high", "max"),
+                                   low=("low", "min"), close=("close", "last"))
+        days.index = pd.DatetimeIndex(days.index).tz_convert("UTC") if days.index.tz else \
+            pd.DatetimeIndex(days.index).tz_localize("UTC")
+        return closed_only(days, "1D")
     shift = pd.Timedelta(hours=24 - SESSION_CLOSE_HOUR)
     key = (h1.index.tz_convert(SESSION_TZ) + shift).date
     days = h1.groupby(key).agg(open=("open", "first"), high=("high", "max"),
@@ -557,7 +572,10 @@ def bias_of(y, p):
     return "NEUTRAL", "inside-день"
 
 
-def day_name(ts):
+def day_name(ts, crypto=None):
+    if crypto if crypto is not None else CRYPTO_ONLY:
+        d = ts.tz_convert("UTC").date()
+        return f"{DAYS_UA[d.weekday()]} {d:%d.%m}"
     d = (ts.tz_convert(SESSION_TZ) + pd.Timedelta(hours=24 - SESSION_CLOSE_HOUR)).date()
     return f"{DAYS_UA[d.weekday()]} {d:%d.%m}"
 
@@ -566,7 +584,7 @@ def context(cache, sym):
     """Контекст на сьогодні; якщо вчорашня свічка нейтральна — беремо з попереднього дня."""
     now = pd.Timestamp.now(tz="UTC")
     h1 = cache.src.bars(sym, "1H", now - pd.Timedelta(days=HISTORY_H1_DAYS))
-    days = daily_sessions(h1)
+    days = daily_sessions(h1, crypto=is_crypto(sym))
     if len(days) < 3:
         raise RuntimeError("замало історії для денного контексту")
     y = days.iloc[-1]
@@ -576,7 +594,7 @@ def context(cache, sym):
         for k in range(2, min(CONTEXT_MAX_BACK + 1, len(days) - 1) + 1):
             b, w = bias_of(days.iloc[-k], days.iloc[-k - 1])
             if b != "NEUTRAL":
-                bias, why, from_day = b, w, day_name(days.index[-k])
+                bias, why, from_day = b, w, day_name(days.index[-k], is_crypto(sym))
                 break
     note = f"вчора {first_why} → контекст зі свічки {from_day}: {why}" if from_day else why
     src = cache.src.label(sym) if hasattr(cache.src, "label") else ""
@@ -780,6 +798,8 @@ def build_contexts(cache):
 def send_morning(ctx, errors, source_note=""):
     now = datetime.now(LOCAL_TZ)
     lines = [f"☀️ <b>Денний контекст</b> · {DAYS_UA[now.weekday()]} {now:%d.%m}"]
+    if CRYPTO_ONLY:
+        lines.append("<i>крипта: денна свічка — доба UTC (закриття о 02:00 Київ), вихідні враховуються</i>")
     if source_note and source_note != "TradeLocker":
         lines.append(f"<i>дані: {source_note}</i>")
     album = []
@@ -1536,12 +1556,15 @@ def run_loop_always(src):
     while datetime.now(LOCAL_TZ) < deadline:
         now = datetime.now(LOCAL_TZ)
         today = now.strftime("%Y-%m-%d")
-        if day != today:  # нова доба (або старт) — перерахувати контекст
+        # день контексту: для крипти — доба UTC (нова денна свічка о 02:00 Київ), інакше — київська
+        ctx_day = datetime.now(timezone.utc).strftime("%Y-%m-%d") if CRYPTO_ONLY else today
+        if day != ctx_day:  # нова доба (або старт) — перерахувати контекст
             ctx, errors = build_contexts(cache)
-            day = today
-            if state.get("morning") != today:
+            day = ctx_day
+            if state.get("morning") != ctx_day or state.get("morning_v") != 2:  # v2: доба UTC для крипти
+                state["morning_v"] = 2
                 send_morning(ctx, errors, getattr(src, "note", ""))
-                state["morning"] = today
+                state["morning"] = ctx_day
                 save_state(state)
         try:
             check_cycle(cache, ctx, state, first)
@@ -1743,7 +1766,7 @@ def main():
         send_text("✅ Бот на зв'язку")
         return
     src = make_source()
-    if OKX_DEMO and mode in ("loop", "once", "okx", "okxreset"):
+    if OKX_DEMO and mode in ("loop", "once", "okx", "okxreset", "okxreport"):
         global TRADER
         from okx_trader import OkxDemoTrader
         inst = {s: src.ids[s] for s in SYMBOLS if s in getattr(src, "ids", {})}
@@ -1755,6 +1778,22 @@ def main():
         except Exception as e:
             send_text(f"⚠️ Не вдалося підключитись до демо-рахунку OKX: {e}\n"
                       f"Спробую знову з наступним запуском (щогодини).")
+            return
+        if TRADER is not None and mode == "okxreport":  # звіт у лог (для розбору), в Telegram нічого
+            st = load_state()
+            print("=== STATE ===")
+            print(json.dumps({k: st.get(k) for k in ("okx_start", "okx_equity", "morning")}, ensure_ascii=False))
+            for j in st.get("journal", []):
+                print("J", json.dumps(j, ensure_ascii=False, default=str))
+            for t in st.get("trades", []):
+                print("T", json.dumps(t, ensure_ascii=False, default=str))
+            print("=== OKX ===")
+            print("USDT", TRADER.account_usdt())
+            for p in TRADER._req("GET", "/api/v5/account/positions", {"instType": "SWAP"}):
+                print("POS", p.get("instId"), p.get("posSide"), p.get("pos"), p.get("avgPx"), p.get("upl"))
+            for p in TRADER._req("GET", "/api/v5/account/positions-history", {"instType": "SWAP", "limit": "100"}):
+                print("HIST", json.dumps({k: p.get(k) for k in ("instId", "posSide", "openAvgPx", "closeAvgPx", "closeTotalPos",
+                      "realizedPnl", "fee", "pnl", "type", "cTime", "uTime")}))
             return
         if TRADER is not None and mode == "okxreset":
             closed, n = TRADER.reset_all()
