@@ -340,7 +340,7 @@ class OkxSource:
         inst, bar = self.ids.get(symbol.upper(), symbol.upper()), self.BAR[resolution]
         frm_ms = int(frm.timestamp() * 1000)
         rows, after = [], None
-        for _ in range(400):  # пагінація назад у часі по 100 свічок
+        for _ in range(int(os.environ.get("OKX_MAX_PAGES", "400"))):  # пагінація назад у часі по 100 свічок
             params = {"instId": inst, "bar": bar, "limit": 100}
             if after:
                 params["after"] = after
@@ -1899,7 +1899,10 @@ def main():
             os.environ["BT_DAYS"] = arg
         import bt3
         bt3.run(src)
-    elif mode in ("bt4", "bt5", "bt6"):
+    elif mode in ("bt4", "bt5", "bt6", "bt7"):
+        if mode == "bt7":
+            os.environ["BT7"] = "1"
+            os.environ.setdefault("OKX_MAX_PAGES", "900")
         if mode == "bt5":
             os.environ["BT5"] = "1"
         if mode == "bt6":

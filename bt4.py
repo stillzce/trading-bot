@@ -16,6 +16,7 @@ import pandas as pd
 
 import bot
 from backtest import session_table
+from bt7 import session_table_crypto
 from bt3 import fvg_entries
 
 TFS = ["1m", "2m", "3m", "5m", "15m", "30m", "1H", "2H", "4H"]
@@ -162,6 +163,8 @@ def nearest_against(tabs, t, side, entry):
 def run(src):
     now = pd.Timestamp.now(tz="UTC")
     okx = getattr(src, "okx", None)
+    if okx is None and isinstance(src, bot.OkxSource):
+        okx = src
     rows = []
     meta = {}
     for sym in bot.SYMBOLS:
@@ -172,7 +175,7 @@ def run(src):
             print(f"{sym}: дані: {e}")
             continue
         meta[sym] = {"src": sname, **{tf: [str(d.index[0])[:10], str(d.index[-1])[:10], len(d)] for tf, d in data.items() if len(d)}}
-        sess = session_table(data["1H"])
+        sess = session_table_crypto(data["1H"]) if os.environ.get("BT7") else session_table(data["1H"])
         s_start = sess["start"].values.astype("datetime64[ns]").astype(np.int64)
         bias = sess["bias"].to_numpy()
         W, OPP, FV, CL = {}, {}, {}, {}
@@ -233,7 +236,7 @@ def run(src):
             for etype, i, side, ext in entries:
                 t = cl[i]
                 loc = pd.Timestamp(t, tz="UTC").tz_convert(bot.LOCAL_TZ)
-                if loc.weekday() >= 5 or not (8 <= loc.hour < 23):
+                if not os.environ.get("BT7") and (loc.weekday() >= 5 or not (8 <= loc.hour < 23)):
                     continue
                 k = np.searchsorted(s_start, t, side="right") - 1
                 if k < 0 or k >= len(bias):
@@ -372,6 +375,8 @@ def run(src):
                                                                   sim(tp5, full_tp=True), sim(tp6, full_tp=True),
                                                                   sim(tp5, be1r=True), sim(tp12))]
                         res[kk] = (round(R / atr, 3), out["E1"], out["E4"], *ext6)
+                    elif os.environ.get("BT7"):
+                        res[kk] = (round(R / atr, 3), out["E1"], out["E4"], float(R))
                     else:
                         res[kk] = (round(R / atr, 3), out["E1"], out["E4"])
                 # зміна контексту всередині дня: свіп рівня проти контексту й повернення за нього
@@ -388,7 +393,10 @@ def run(src):
                              float(entry)))
         print(f"{sym} ({meta[sym]['src']}): записів {sum(1 for r in rows if r[0] == sym)} · {time.time() - t0:.0f} c")
     print("META", json.dumps(meta, ensure_ascii=False))
-    if os.environ.get("BT6"):
+    if os.environ.get("BT7"):
+        import bt7
+        bt7.report7(rows)
+    elif os.environ.get("BT6"):
         report6(rows)
     elif os.environ.get("BT5"):
         report5(rows)
