@@ -163,7 +163,7 @@ def nearest_against(tabs, t, side, entry):
 def run(src):
     now = pd.Timestamp.now(tz="UTC")
     okx = getattr(src, "okx", None)
-    if okx is None and isinstance(src, bot.OkxSource):
+    if okx is None and type(src).__name__ == "OkxSource":
         okx = src
     rows = []
     meta = {}
