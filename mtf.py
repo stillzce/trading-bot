@@ -68,6 +68,7 @@ class Engine:
         self.inzone = {sg: {tf: False for tf in TFS} for sg in (1, -1)}
         self.hist = {tf: {"h": [], "l": [], "w": []} for tf in TFS}   # останні свічки для «хвилі» дна
         self.last = {tf: None for tf in TFS}                           # час закриття останньої обробленої свічки
+        self.dbg = None                                                # список для діагностики (mtfdebug)
 
     def step(self, t, closed, m1, atr):
         """t — час (хвилини від epoch) закриття; closed — {tf: (h, l, c, w)} свічок, що закрились у t;
@@ -123,6 +124,9 @@ class Engine:
             else:
                 c1 = None
             if TFS.index(st.base) < TFS.index(self.MIN_BASE):
+                if self.dbg is not None:
+                    self.dbg.append((t, sg, "база нижче мінімуму", dict(base=st.base, zones=sorted(st.zone_tfs, key=TFS.index),
+                                                                       dno=st.dno * sg)))
                 continue                                    # дно ще не підтвердилось на потрібному ТФ
             bi = TFS.index(st.base) if self.FROM == "base" else TFS.index(st.trig)
             if not any(tf in closed for tf in TFS[bi:]) or c1 is None or not atr or atr != atr:
@@ -141,6 +145,13 @@ class Engine:
                     continue
                 need = (bi, TFS[bi], min(own, key=lambda f: f[0]))
             etf = need[1] if self.ENTRY_TF == "fvg" else st.base
+            if self.dbg is not None:
+                self.dbg.append((t, sg, "чекаю закріп" if etf in closed else "ТФ закріпу ще не закрився",
+                                 dict(base=st.base, trig=st.trig, zones=sorted(st.zone_tfs, key=TFS.index),
+                                      dno=st.dno * sg, need_tf=need[1],
+                                      fvg=sorted((need[2][0] * sg, need[2][1] * sg)), edge=need[2][2] * sg,
+                                      close=(closed[etf][2] if etf in closed else None),
+                                      cands=[(x[1], round(x[2][0] * sg, 4), round(x[2][2] * sg, 4)) for x in cands][:8])))
             if etf not in closed:
                 continue
             ce = closed[etf][2] * sg

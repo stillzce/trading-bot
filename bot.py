@@ -2062,6 +2062,30 @@ def main():
             os.environ["BT_DAYS"] = arg
         import bt3
         bt3.run(src)
+    elif mode.startswith("mtfdebug"):  # mtfdebug:SYM1,SYM2:HH:MM-HH:MM (UTC) — що бачив рушій MTF у вікні
+        _, syms, win = mode.split(":", 2)
+        a, b = win.split("-")
+        day = pd.Timestamp.now(tz="UTC").normalize()
+        t_a = int((day + pd.Timedelta(a + ":00")).value // 60_000_000_000)
+        t_b = int((day + pd.Timedelta(b + ":00")).value // 60_000_000_000)
+        cache = BarCache(src)
+        ctx, _ = build_contexts(cache)
+        import mtf
+        for sym in syms.split(","):
+            MTF_ENG.clear()
+            eng = MTF_ENG[sym] = mtf.Engine(1.5, "fvg", "trig", MTF_MIN_BASE)
+            eng.dbg = []
+            globals()["SYMBOLS"] = [sym]
+            st = {}
+            globals()["send_text"] = lambda txt, reply_to=None: print("MSG", txt.replace("\n", " | ")) or 1
+            mtf_cycle(cache, ctx, st, True, live_from=t_a)
+            print(f"=== {sym} · контекст {ctx[sym]['bias']} ({ctx[sym]['note']})")
+            for t, sg, why, info in eng.dbg:
+                if t_a <= t <= t_b:
+                    ts = pd.Timestamp(t * 60_000_000_000, tz="UTC").tz_convert(LOCAL_TZ)
+                    print("DBG", f"{ts:%H:%M}", "LONG" if sg == 1 else "SHORT", why, json.dumps(info, ensure_ascii=False, default=str))
+            print("TRADES", [(x["side"], x["t_open"], x["base"], x["tf"]) for x in st.get("trades", [])],
+                  [(j["side"], j["t_open"], j["how"], j["total"]) for j in st.get("journal", [])])
     elif mode == "mtfreplay":  # живий цикл MTF по останній ~добі «наживо», без угод і без Telegram (перевірка)
         DRY_RUN = True
         cache = BarCache(src)
