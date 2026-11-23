@@ -1934,6 +1934,11 @@ def main():
             os.environ["BT_DAYS"] = arg
         import bt3
         bt3.run(src)
+    elif mode == "mtf":
+        os.environ.setdefault("OKX_MAX_PAGES", "900")
+        os.environ["BT7"] = "1"
+        import mtf
+        mtf.run(src)
     elif mode in ("bt4", "bt5", "bt6", "bt7", "bt8", "bt9"):
         if mode == "bt8":
             os.environ["BT8"] = "1"
