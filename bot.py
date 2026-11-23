@@ -1489,7 +1489,7 @@ def mtf_cycle(cache, ctx, state, first=False, live_from=None):
                        f"📐 Вхід {fmt(price)} · Стоп {fmt(stop)} ({'під дном' if sg == 1 else 'над вершиною'}) · "
                        f"1R = {R / price * 100:.2f}%\n"
                        f"Вихід: реверс із базою ≥ {TF_LABEL[base]} або стоп\n"
-                       f"Дані: OKX {cache.src.label(sym) if hasattr(cache.src, 'label') else sym}")
+                       f"Дані: {cache.src.label(sym) if hasattr(cache.src, 'label') else sym}")
                 mid = send_text(txt)
                 open_trade(state, sym, side, ftf, price, stop, ts, mid, "🧭")
                 tr = state["trades"][-1]
