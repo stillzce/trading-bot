@@ -58,6 +58,10 @@ TRADER = None  # OkxDemoTrader, створюється в main()
 ALLOW_ADD = env("ALLOW_ADD", "1" if OKX_DEMO else "0") == "1"
 # Вхід у бік контексту: "wt" — на виході WT із зони; "fvg" — лише на закріпі тіла за FVG після дна/вершини WT
 CTX_ENTRY = env("CTX_ENTRY", "fvg" if OKX_DEMO else "wt")
+# Модель сигналів: "mtf" — мультитаймфреймова (дно на будь-якому ТФ → закріп за FVG від ТФ тригера вгору →
+# вихід на реверсі з базою ≥ бази входу); "classic" — по одному ТФ, як раніше
+MODEL = env("MODEL", "mtf" if OKX_DEMO else "classic")
+MTF_MIN_BASE = env("MTF_MIN_BASE", "3m")   # дно має підтвердитись щонайменше на цьому ТФ
 MAX_SAME = int(env("MAX_SAME", "3"))
 SYMBOLS = split(env("OKX_SYMBOLS", "BTCUSDT,ETHUSDT,SOLUSDT") if OKX_DEMO else
                 env("SYMBOLS", "US500,NAS100,GER40,EURUSD,GBPUSD,AUDUSD,NZDUSD,XAUUSD"))
@@ -1397,12 +1401,127 @@ def _close_trade(state, t, total, how, when):
     state["trades"] = [x for x in state.get("trades", []) if x is not t]
 
 
+MTF_TFS = ["1m", "3m", "5m", "15m", "30m", "1H", "4H"]
+MTF_ENG = {}  # sym -> mtf.Engine (у пам'яті; при старті прогрівається на історії)
+
+
+def _tmin(index, tf):
+    """Час закриття свічок у хвилинах від epoch."""
+    return (index + pd.Timedelta(minutes=TF_MIN[tf])).values.astype("datetime64[m]").astype(np.int64)
+
+
+def mtf_cycle(cache, ctx, state, first=False, live_from=None):
+    """Мультитаймфреймова модель: подає нові закриті свічки всіх ТФ у рушій mtf.Engine (той самий, що в бектесті),
+    відкриває угоди на сигналах у бік контексту, закриває на реверсі з базою ≥ бази входу, на стопі або через 10 днів."""
+    import mtf
+    now_min = int(pd.Timestamp.now(tz="UTC").value // 60_000_000_000)
+    for sym in SYMBOLS:
+        c = ctx.get(sym)
+        try:
+            dfs = {tf: cache.get(sym, tf) for tf in MTF_TFS}
+        except Exception as e:
+            print(f"MTF {sym}: дані: {e}")
+            continue
+        if any(d is None or d.empty for d in dfs.values()):
+            continue
+        eng = MTF_ENG.get(sym)
+        if eng is None:
+            eng = MTF_ENG[sym] = mtf.Engine(1.5, "fvg", "trig", MTF_MIN_BASE)
+        ev = {}
+        for tf, d in dfs.items():
+            w = wavetrend(d)[0].to_numpy()
+            tc = _tmin(d.index, tf)
+            hh, ll, cc = d["high"].to_numpy(), d["low"].to_numpy(), d["close"].to_numpy()
+            last = eng.last[tf]
+            for j in (np.nonzero(tc > last)[0] if last is not None else range(len(d))):
+                if np.isnan(w[j]):
+                    continue
+                ev.setdefault(int(tc[j]), {})[tf] = (float(hh[j]), float(ll[j]), float(cc[j]), float(w[j]))
+        m1 = dfs["1m"]
+        m1t = _tmin(m1.index, "1m")
+        m1map = dict(zip(m1t.tolist(), zip(m1["high"].tolist(), m1["low"].tolist(), m1["close"].tolist())))
+        d15 = dfs["15m"]
+        atr15 = (d15["high"] - d15["low"]).rolling(14).mean().to_numpy()
+        t15 = _tmin(d15.index, "15m")
+
+        def atr_at(t):
+            k = int(np.searchsorted(t15, t, side="right")) - 1
+            return float(atr15[k]) if k >= 14 and not np.isnan(atr15[k]) else None
+
+        for t in sorted(ev):
+            m1bar = m1map.get(t)
+            sigs = eng.step(t, ev[t], m1bar, atr_at(t))
+            if t < (now_min - 3 if live_from is None else live_from):  # прогрів / запізнілі сигнали — без дій
+                continue
+            ts = pd.Timestamp(int(t) * 60_000_000_000, tz="UTC")
+            for tr in [x for x in state.get("trades", []) if x.get("mtf") and x["sym"] == sym]:
+                if m1bar is None or t <= tr["t_min"]:
+                    continue
+                hit = m1bar[1] <= tr["stop"] if tr["side"] == "LONG" else m1bar[0] >= tr["stop"]
+                if hit:
+                    send_text(f"🛑 {sym} {tr['side']} (вхід {tr['t_open']}): стоп {fmt(tr['stop'])} — −1.0R", tr["mid"])
+                    _close_trade(state, tr, -1.0, "стоп", ts)
+            for sg, base, ftf, price, dno, zt, fvg in sigs:
+                side = "LONG" if sg == 1 else "SHORT"
+                for tr in [x for x in state.get("trades", []) if x.get("mtf") and x["sym"] == sym
+                           and x["side"] != side]:
+                    if MTF_TFS.index(base) >= MTF_TFS.index(tr["base"]):
+                        r = (1 if tr["side"] == "LONG" else -1) * (price - tr["entry"]) / tr["R"]
+                        send_text(f"🔁 {sym} {tr['side']} (вхід {tr['t_open']}): реверс — сигнал {side} з базою "
+                                  f"{TF_LABEL[base]} @{fmt(price)} → закриваю, {r:+.1f}R", tr["mid"])
+                        _close_trade(state, tr, r, "реверс", ts)
+                if c is None or c["bias"] != ("BULL" if sg == 1 else "BEAR"):
+                    continue
+                if any(x.get("mtf") and x["sym"] == sym for x in state.get("trades", [])):
+                    continue  # одна угода на актив
+                stop = dno - sg * price * 0.0001
+                R = sg * (price - stop)
+                if R <= price * 0.0003:
+                    continue
+                icon = "🟢" if sg == 1 else "🔴"
+                chain = " → ".join(TF_LABEL[x] for x in zt)
+                txt = (f"🧭 <b>MTF</b> · {icon} <b>{side} · {sym}</b>\n"
+                       f"{'Дно' if sg == 1 else 'Вершина'} WT: {chain} (база {TF_LABEL[base]}) · "
+                       f"{'дно' if sg == 1 else 'вершина'} {fmt(dno)}\n"
+                       f"Закріп: тіло {TF_LABEL[ftf]} закрилось {'вище' if sg == 1 else 'нижче'} "
+                       f"FVG {TF_LABEL[ftf]} {fmt(fvg[0])}–{fmt(fvg[1])}\n"
+                       f"Контекст дня: {BIAS_ICON[c['bias']]} {c['bias']} — {c['note']}\n"
+                       f"📐 Вхід {fmt(price)} · Стоп {fmt(stop)} ({'під дном' if sg == 1 else 'над вершиною'}) · "
+                       f"1R = {R / price * 100:.2f}%\n"
+                       f"Вихід: реверс із базою ≥ {TF_LABEL[base]} або стоп\n"
+                       f"Дані: OKX {cache.src.label(sym) if hasattr(cache.src, 'label') else sym}")
+                mid = send_text(txt)
+                open_trade(state, sym, side, ftf, price, stop, ts, mid, "🧭")
+                tr = state["trades"][-1]
+                tr.update(mtf=True, base=base, t_min=int(t))
+        for tr in [x for x in state.get("trades", []) if x.get("mtf") and x["sym"] == sym]:
+            if TRADER is not None and tr.get("okx") and not tr["okx"].get("closed"):
+                try:
+                    xpx = TRADER.check_stop(state, tr)
+                except Exception as e:
+                    print(f"OKX перевірка стопу {sym}: {e}")
+                    xpx = None
+                if xpx is not None:
+                    send_text(f"🛑 {sym} {tr['side']} (вхід {tr['t_open']}): стоп спрацював на біржі OKX @{fmt(xpx)} "
+                              f"— −1.0R", tr["mid"])
+                    _close_trade(state, tr, -1.0, "стоп (біржа)", pd.Timestamp.now(tz="UTC"))
+                    continue
+            if now_min - tr["t_min"] > 10 * 24 * 60:
+                px = float(m1["close"].iloc[-1])
+                r = (1 if tr["side"] == "LONG" else -1) * (px - tr["entry"]) / tr["R"]
+                send_text(f"⌛ {sym} {tr['side']} (вхід {tr['t_open']}): 10 днів без виходу — закриваю, {r:+.1f}R",
+                          tr["mid"])
+                _close_trade(state, tr, r, "час", pd.Timestamp.now(tz="UTC"))
+
+
 def manage_trades(cache, ctx, state, first=False):
     """Віртуальний супровід кожної угоди: +1R, ½ на протилежному сигналі свого ТФ (далі стоп у БУ),
     решта — на протилежному сигналі старшого ТФ; стоп. Пише відповіддю на повідомлення сигналу."""
     now = pd.Timestamp.now(tz="UTC")
     minute_idx = int(now.timestamp() // 60)
     for t in list(state.get("trades", [])):
+        if t.get("mtf"):
+            continue  # угоди мультитаймфреймової моделі веде mtf_cycle
         sym, side = t["sym"], t["side"]
         send_text = (lambda *a, **k: None) if t.get("silent") else globals()["send_text"]
         c = ctx.get(sym)
@@ -1574,7 +1693,7 @@ def send_daily_summary(state):
         tot = sum(j["total"] for j in done)
         wins = sum(1 for j in done if j["total"] > 0)
         lines.append(f"Закрито {len(done)} · у плюсі {wins} · разом {tot:+.1f}R")
-        for g in ("🅰️", "🅱️", "⚠️", "🔄"):
+        for g in ("🧭", "🅰️", "🅱️", "⚠️", "🔄"):
             gg = [j for j in done if j.get("grade") == g]
             if gg:
                 lines.append(f"   {g}: {len(gg)} угод · {sum(j['total'] for j in gg):+.1f}R")
@@ -1635,12 +1754,21 @@ def run_loop_always(src):
                 send_morning(ctx, errors, getattr(src, "note", ""))
                 state["morning"] = ctx_day
                 save_state(state)
+        if MODEL == "mtf":
+            try:
+                mtf_cycle(cache, ctx, state, first)
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                print(f"Помилка MTF: {e}")
+        else:
+            try:
+                check_cycle(cache, ctx, state, first)
+            except Exception as e:
+                print(f"Помилка циклу: {e}")
         try:
-            check_cycle(cache, ctx, state, first)
-        except Exception as e:
-            print(f"Помилка циклу: {e}")
-        try:
-            manage_trades(cache, ctx, state, first)
+            if MODEL != "mtf":
+                manage_trades(cache, ctx, state, first)
             check_warnings(state)
             if now >= local_dt(summary_at, now) and state.get("summary") != today:
                 send_daily_summary(state)
@@ -1934,6 +2062,16 @@ def main():
             os.environ["BT_DAYS"] = arg
         import bt3
         bt3.run(src)
+    elif mode == "mtfreplay":  # живий цикл MTF по останній ~добі «наживо», без угод і без Telegram (перевірка)
+        DRY_RUN = True
+        cache = BarCache(src)
+        ctx, _ = build_contexts(cache)
+        st = {}
+        now_min = int(pd.Timestamp.now(tz="UTC").value // 60_000_000_000)
+        mtf_cycle(cache, ctx, st, True, live_from=now_min - int(env("REPLAY_HOURS", "30")) * 60)
+        print("ВІДКРИТІ:", [(t["sym"], t["side"], t["tf"], t["base"], t["t_open"]) for t in st.get("trades", [])])
+        print("ЖУРНАЛ:", [(j["sym"], j["side"], j["t_open"], j.get("t_close"), j["how"], j["total"])
+                          for j in st.get("journal", [])])
     elif mode == "mtf":
         os.environ.setdefault("BT_M1_DAYS", "180")
         os.environ.setdefault("OKX_MAX_PAGES", "2700")

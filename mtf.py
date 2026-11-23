@@ -41,7 +41,7 @@ def prep(m1):
 
 
 class Side:
-    """Сетап і позиція в один бік. Для шорта ціни дзеркалимо (×−1), тож логіка одна."""
+    """Сетап в один бік. Для шорта ціни дзеркалимо (×−1), тож логіка одна."""
 
     def __init__(self, sg):
         self.sg = sg
@@ -56,45 +56,47 @@ class Side:
         self.trig = None
 
 
-def run_variant(D, atr_at, bias_at, NEAR, ENTRY_TF, EXIT, CTX, FROM="base", EXIT_REF="base", EXIT_OFF=0):
-    """FROM: з якого ТФ шукати FVG для закріпу — "base" (найстарший ТФ із дном) або "trig" (ТФ тригера, вгору).
-    EXIT_REF/EXIT_OFF: вихід на реверсі з базовим ТФ ≥ (ТФ бази або ТФ FVG входу) − EXIT_OFF."""
-    """Повертає список угод."""
-    ti = {tf: 0 for tf in TFS}            # скільки свічок кожного ТФ уже закрито
-    tm = D["1m"]["t"]
-    trades = []
-    pos = None                            # відкрита позиція
-    S = {1: Side(1), -1: Side(-1)}
-    # FVG проти: для лонга — ведмежі (h[i] < l[i-2]), для шорта — бичачі. [низ, верх, межа закріпу, t утворення]
-    fv = {sg: {tf: [] for tf in TFS} for sg in (1, -1)}
-    inzone = {sg: {tf: False for tf in TFS} for sg in (1, -1)}
-    for k in range(len(tm)):
-        t = tm[k]
-        closed = []
-        for tf in TFS:
-            arr = D[tf]
-            j = ti[tf]
-            if j < len(arr["t"]) and arr["t"][j] <= t:
-                ti[tf] = j + 1
-                closed.append((tf, j))
-        closed_set = {tf for tf, _ in closed}
-        a1 = D["1m"]
-        # 1) WT-зони на закритих свічках (дно / базовий ТФ)
-        for tf, j in closed:
-            a = D[tf]
+class Engine:
+    """Мультитаймфреймовий детектор сигналів для одного активу. Отримує закриті свічки по черзі (step).
+    Сигнал: (sg, base, ftf, ціна, дно, [ТФ із дном], (низ FVG, верх FVG))."""
+
+    def __init__(self, NEAR=1.5, ENTRY_TF="fvg", FROM="trig", MIN_BASE="1m"):
+        self.NEAR, self.ENTRY_TF, self.FROM, self.MIN_BASE = NEAR, ENTRY_TF, FROM, MIN_BASE
+        self.S = {1: Side(1), -1: Side(-1)}
+        # FVG проти: [низ, верх, межа закріпу, t утворення] у «лонгових» (для шорта — дзеркальних) координатах
+        self.fv = {sg: {tf: [] for tf in TFS} for sg in (1, -1)}
+        self.inzone = {sg: {tf: False for tf in TFS} for sg in (1, -1)}
+        self.hist = {tf: {"h": [], "l": [], "w": []} for tf in TFS}   # останні свічки для «хвилі» дна
+        self.last = {tf: None for tf in TFS}                           # час закриття останньої обробленої свічки
+
+    def step(self, t, closed, m1, atr):
+        """t — час (хвилини від epoch) закриття; closed — {tf: (h, l, c, w)} свічок, що закрились у t;
+        m1 — (h, l, c) хвилинки, що закрилась у t (або None); atr — ATR(M15). Повертає список сигналів."""
+        for tf, (h, l, c, w) in closed.items():
+            H = self.hist[tf]
+            H["h"].append(h); H["l"].append(l); H["w"].append(w)
+            if len(H["h"]) > 40:
+                for key in H:
+                    del H[key][0]
+            self.last[tf] = t
+        # 1) WT-зони (дно / базовий ТФ / ТФ тригера)
+        for tf, (h, l, c, w) in closed.items():
+            H = self.hist[tf]
+            n = len(H["w"])
             for sg in (1, -1):
-                st = S[sg]
-                w = a["w"][j] * sg
-                was = inzone[sg][tf]
-                now_in = w <= bot.WT_OS
-                inzone[sg][tf] = now_in
+                st = self.S[sg]
+                now_in = w * sg <= bot.WT_OS
+                was = self.inzone[sg][tf]
+                self.inzone[sg][tf] = now_in
                 if now_in and not was:
-                    ww = a["w"][:j + 1] * sg
+                    ww = [x * sg for x in H["w"]]
+                    j = n - 1
                     kk = j - 1
                     while kk > 0 and kk > j - 21 and ww[kk] < ww[kk - 1]:
                         kk -= 1
-                    lows = (a["l"][kk:j + 1] if sg == 1 else -a["h"][kk:j + 1])
-                    d0 = float(lows.min())
+                    kk = max(kk, 0)
+                    lows = H["l"][kk:j + 1] if sg == 1 else [-x for x in H["h"][kk:j + 1]]
+                    d0 = float(min(lows))
                     if not st.active:
                         st.active, st.dno, st.base, st.t0, st.zone_tfs, st.trig = True, d0, tf, t, {tf}, tf
                     else:
@@ -104,64 +106,89 @@ def run_variant(D, atr_at, bias_at, NEAR, ENTRY_TF, EXIT, CTX, FROM="base", EXIT
                             st.base = tf
                         if TFS.index(tf) < TFS.index(st.trig):
                             st.trig = tf
-        # 2) злам/зсув дна і перевірка закріпу (FVG — у стані ДО цієї свічки, як у боті)
-        sig_now = []
+        # 2) злам/зсув дна і закріп (FVG — у стані ДО цієї свічки)
+        sigs = []
         for sg in (1, -1):
-            st = S[sg]
+            st = self.S[sg]
             if not st.active:
                 continue
-            l1 = a1["l"][k] if sg == 1 else -a1["h"][k]
-            c1 = a1["c"][k] * sg
-            if c1 < st.dno or t - st.t0 > 3 * 24 * 60:
-                st.reset()
-                continue
-            if l1 < st.dno:
-                st.dno = l1
-            bi = TFS.index(st.base) if FROM == "base" else TFS.index(st.trig)
-            if not any(tf in closed_set for tf in TFS[bi:]):
-                continue
-            atr = atr_at(t)
-            if not atr or np.isnan(atr):
+            if m1 is not None:
+                l1 = m1[1] if sg == 1 else -m1[0]
+                c1 = m1[2] * sg
+                if c1 < st.dno or t - st.t0 > 3 * 24 * 60:
+                    st.reset()
+                    continue
+                if l1 < st.dno:
+                    st.dno = l1
+            else:
+                c1 = None
+            if TFS.index(st.base) < TFS.index(self.MIN_BASE):
+                continue                                    # дно ще не підтвердилось на потрібному ТФ
+            bi = TFS.index(st.base) if self.FROM == "base" else TFS.index(st.trig)
+            if not any(tf in closed for tf in TFS[bi:]) or c1 is None or not atr or atr != atr:
                 continue
             cands = []
             for tf in TFS[bi:]:
-                for f in fv[sg][tf]:
-                    if f[0] > st.dno and f[0] - c1 <= NEAR * atr:
+                for f in self.fv[sg][tf]:
+                    if f[0] > st.dno and f[0] - c1 <= self.NEAR * atr:
                         cands.append((TFS.index(tf), tf, f))
             if cands:
                 top = max(x[0] for x in cands)
                 need = min((x for x in cands if x[0] == top), key=lambda x: x[2][0])
             else:
-                own = [f for f in fv[sg][TFS[bi]] if f[3] >= st.t0 and f[0] > st.dno]
+                own = [f for f in self.fv[sg][TFS[bi]] if f[3] >= st.t0 and f[0] > st.dno]
                 if not own:
                     continue
                 need = (bi, TFS[bi], min(own, key=lambda f: f[0]))
-            etf = need[1] if ENTRY_TF == "fvg" else st.base
-            if etf not in closed_set:
+            etf = need[1] if self.ENTRY_TF == "fvg" else st.base
+            if etf not in closed:
                 continue
-            ce = D[etf]["c"][ti[etf] - 1] * sg
+            ce = closed[etf][2] * sg
             if ce > need[2][2]:
-                sig_now.append((sg, st.base, need[1], float(ce * sg), float(st.dno * sg)))
+                f = need[2]
+                lo, hi = sorted((f[0] * sg, f[1] * sg))
+                sigs.append((sg, st.base, need[1], float(ce * sg), float(st.dno * sg),
+                             sorted(st.zone_tfs, key=TFS.index), (lo, hi)))
                 st.reset()
-        # 3) оновити FVG проти на закритих свічках
-        for tf, j in closed:
-            a = D[tf]
+        # 3) оновити FVG проти
+        for tf, (h0, l0_, c0, w0) in closed.items():
+            H = self.hist[tf]
             for sg in (1, -1):
-                h = a["h"][j] if sg == 1 else -a["l"][j]
-                c = a["c"][j] * sg
+                h = h0 if sg == 1 else -l0_
+                c = c0 * sg
                 keep = []
-                for f in fv[sg][tf]:
+                for f in self.fv[sg][tf]:
                     if c > f[2]:
                         continue
                     if h >= f[0]:
                         f[2] = max(f[2], h)
                     keep.append(f)
-                if j >= 2:
-                    l0 = a["l"][j - 2] if sg == 1 else -a["h"][j - 2]
-                    if h < l0:
-                        keep.append([h, l0, l0, t])
-                fv[sg][tf] = keep[-60:]
-        # 4) позиція: спершу стоп (усередині хвилини), потім реверс на закритті, потім час
+                if len(H["h"]) >= 3:
+                    l2 = H["l"][-3] if sg == 1 else -H["h"][-3]
+                    if h < l2:
+                        keep.append([h, l2, l2, t])
+                self.fv[sg][tf] = keep[-60:]
+        return sigs
+
+
+def run_variant(D, atr_at, bias_at, NEAR, ENTRY_TF, EXIT, CTX, FROM="base", EXIT_REF="base", EXIT_OFF=0,
+                MIN_BASE="1m"):
+    """Бектест однієї конфігурації на рушії Engine. Одна позиція на актив."""
+    eng = Engine(NEAR, ENTRY_TF, FROM, MIN_BASE)
+    ti = {tf: 0 for tf in TFS}
+    tm = D["1m"]["t"]
+    a1 = D["1m"]
+    trades, pos = [], None
+    for k in range(len(tm)):
+        t = tm[k]
+        closed = {}
+        for tf in TFS:
+            arr = D[tf]
+            j = ti[tf]
+            if j < len(arr["t"]) and arr["t"][j] <= t:
+                ti[tf] = j + 1
+                closed[tf] = (arr["h"][j], arr["l"][j], arr["c"][j], arr["w"][j])
+        sig_now = eng.step(t, closed, (a1["h"][k], a1["l"][k], a1["c"][k]), atr_at(t))
         if pos is not None:
             lo = a1["l"][k] if pos["sg"] == 1 else a1["h"][k]
             if (pos["sg"] == 1 and lo <= pos["stop"]) or (pos["sg"] == -1 and lo >= pos["stop"]):
@@ -169,7 +196,7 @@ def run_variant(D, atr_at, bias_at, NEAR, ENTRY_TF, EXIT, CTX, FROM="base", EXIT
                 trades.append(pos)
                 pos = None
         if pos is not None:
-            for sg, base, ftf, price, dno in sig_now:
+            for sg, base, ftf, price, dno, _, _ in sig_now:
                 ref = TFS.index(pos["base"] if EXIT_REF == "base" else pos["ftf"]) - EXIT_OFF
                 if sg == -pos["sg"] and (EXIT == "any" or TFS.index(base) >= ref):
                     pos.update(exit=price, r=pos["sg"] * (price - pos["entry"]) / pos["R"], how="реверс", t1=int(t))
@@ -181,8 +208,7 @@ def run_variant(D, atr_at, bias_at, NEAR, ENTRY_TF, EXIT, CTX, FROM="base", EXIT
             pos.update(exit=price, r=pos["sg"] * (price - pos["entry"]) / pos["R"], how="час", t1=int(t))
             trades.append(pos)
             pos = None
-        # 5) вхід
-        for sg, base, ftf, price, dno in sig_now:
+        for sg, base, ftf, price, dno, _, _ in sig_now:
             if pos is not None:
                 break
             b = bias_at(t)
@@ -210,14 +236,11 @@ def stats(rr):
 def run(src):
     now = pd.Timestamp.now(tz="UTC")
     okx = src if type(src).__name__ == "OkxSource" else getattr(src, "okx", None)
-    # (назва, NEAR, ENTRY_TF, EXIT, CTX, FROM, EXIT_REF, EXIT_OFF)
+    # (назва, NEAR, ENTRY_TF, EXIT, CTX, FROM, EXIT_REF, EXIT_OFF, MIN_BASE)
     variants = [
-        ("C: FVG від базового ТФ · вихід реверс ≥ бази", 1.5, "fvg", "base", 1, "base", "base", 0),
-        ("C1: FVG від базового ТФ · вихід реверс ≥ бази−1", 1.5, "fvg", "base", 1, "base", "base", 1),
-        ("G: FVG від ТФ тригера · вихід реверс ≥ ТФ входу", 1.5, "fvg", "base", 1, "trig", "ftf", 0),
-        ("H: FVG від ТФ тригера · вихід реверс ≥ ТФ входу−1", 1.5, "fvg", "base", 1, "trig", "ftf", 1),
-        ("J: FVG від ТФ тригера · вихід реверс ≥ бази", 1.5, "fvg", "base", 1, "trig", "base", 0),
-        ("A: FVG від базового ТФ · вихід будь-який реверс", 1.5, "fvg", "any", 1, "base", "base", 0),
+        ("J: FVG від ТФ тригера · вихід реверс ≥ бази", 1.5, "fvg", "base", 1, "trig", "base", 0, "1m"),
+        ("J3: як J, дно щонайменше на M3 (ЖИВА КОНФІГУРАЦІЯ)", 1.5, "fvg", "base", 1, "trig", "base", 0, "3m"),
+        ("J5: як J, дно щонайменше на M5", 1.5, "fvg", "base", 1, "trig", "base", 0, "5m"),
     ]
     allres = {v[0]: [] for v in variants}
     for sym in bot.SYMBOLS:
@@ -242,8 +265,8 @@ def run(src):
             return bias[k] if 0 <= k < len(bias) else None
 
         print(f"{sym}: хвилинок {len(m1)} з {m1.index[0]} по {m1.index[-1]}")
-        for name, near, etf, ex, ctx, frm, eref, eoff in variants:
-            tr = run_variant(D, atr_at, bias_at, near, etf, ex, ctx, frm, eref, eoff)
+        for name, near, etf, ex, ctx, frm, eref, eoff, mb in variants:
+            tr = run_variant(D, atr_at, bias_at, near, etf, ex, ctx, frm, eref, eoff, mb)
             for x in tr:
                 x["sym"] = sym
                 x["rf"] = x["r"] - FEE * x["entry"] / x["R"]
