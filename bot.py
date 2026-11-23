@@ -2063,7 +2063,7 @@ def main():
         import bt3
         bt3.run(src)
     elif mode.startswith("mtfdebug"):  # mtfdebug:SYM1,SYM2:HH:MM-HH:MM (UTC) — що бачив рушій MTF у вікні
-        _, syms, win = mode.split(":", 2)
+        syms, win = arg.split(":", 1)
         a, b = win.split("-")
         day = pd.Timestamp.now(tz="UTC").normalize()
         t_a = int((day + pd.Timedelta(a + ":00")).value // 60_000_000_000)
