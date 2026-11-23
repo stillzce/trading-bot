@@ -170,7 +170,7 @@ def features(data, W, CL, tf, i, t, side, entry, ext, atr, fvg, s_start, pdh, pd
     sg = 1 if long_ else -1
     w1 = W[tf][0].to_numpy()
     lo = max(0, i - 40)
-    depth = float(w1[lo:i + 1].min()) if long_ else float(-w1[lo:i + 1].max())   # наскільки глибоко було дно WT
+    depth = float(-w1[lo:i + 1].min()) if long_ else float(w1[lo:i + 1].max())   # наскільки глибоко було дно WT (>0)
     chase = sg * (entry - ext) / atr                                                  # як далеко від дна вхід (ATR M15)
     fsize = (fvg[1] - fvg[0]) / atr if fvg else 0.0                                   # розмір FVG закріпу (ATR M15)
     htf = {}
