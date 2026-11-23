@@ -377,6 +377,13 @@ def run(src):
                         res[kk] = (round(R / atr, 3), out["E1"], out["E4"], *ext6)
                     elif os.environ.get("BT7"):
                         res[kk] = (round(R / atr, 3), out["E1"], out["E4"], float(R))
+                        if os.environ.get("BT8") and kk == 0.0 and etype == "FVG" and ctx == "with":
+                            import bt7
+                            jh8 = jh if jh is not None and jh <= jend else None
+                            jx8 = jx if jx is not None and jx <= jend else None
+                            res[kk] = res[kk] + tuple(bt7.trail_variants(
+                                h, l, c, i, jend, long_, entry, stop, R, jh8, jx8, px,
+                                float(atr_tf[i]) if not np.isnan(atr_tf[i]) else 0.0))
                     else:
                         res[kk] = (round(R / atr, 3), out["E1"], out["E4"])
                 # зміна контексту всередині дня: свіп рівня проти контексту й повернення за нього
@@ -393,7 +400,10 @@ def run(src):
                              float(entry)))
         print(f"{sym} ({meta[sym]['src']}): записів {sum(1 for r in rows if r[0] == sym)} · {time.time() - t0:.0f} c")
     print("META", json.dumps(meta, ensure_ascii=False))
-    if os.environ.get("BT7"):
+    if os.environ.get("BT8"):
+        import bt7
+        bt7.report8(rows)
+    elif os.environ.get("BT7"):
         import bt7
         bt7.report7(rows)
     elif os.environ.get("BT6"):
