@@ -34,13 +34,13 @@ jobs:
 
       - run: pip install -r requirements.txt
 
-      # окремий стан, щоб не змішувався з основним ботом (ключ НЕ починається з "state-"; okxdemo2 — тест з нуля 21.11)
+      # окремий стан, щоб не змішувався з основним ботом (ключ НЕ починається з "state-"; okxdemo3 — тест з нуля 23.11)
       - name: Відновити стан
         uses: actions/cache/restore@v4
         with:
           path: state
-          key: okxdemo2-${{ github.run_id }}
-          restore-keys: okxdemo2-
+          key: okxdemo3-${{ github.run_id }}
+          restore-keys: okxdemo3-
 
       - name: Запуск
         env:
@@ -69,7 +69,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: state
-          key: okxdemo2-${{ github.run_id }}
+          key: okxdemo3-${{ github.run_id }}
 
       - name: Не дати GitHub вимкнути розклад
         if: always()

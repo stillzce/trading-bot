@@ -56,6 +56,8 @@ DEMO_TAG = "🧪 <b>ДЕМО OKX</b>\n" if OKX_DEMO else ""
 TRADER = None  # OkxDemoTrader, створюється в main()
 # Добір: новий сигнал у той самий бік відкриває ще одну окрему угоду (свій стоп, своя ½, свій вихід), до MAX_SAME на актив/бік
 ALLOW_ADD = env("ALLOW_ADD", "1" if OKX_DEMO else "0") == "1"
+# Вхід у бік контексту: "wt" — на виході WT із зони; "fvg" — лише на закріпі тіла за FVG після дна/вершини WT
+CTX_ENTRY = env("CTX_ENTRY", "fvg" if OKX_DEMO else "wt")
 MAX_SAME = int(env("MAX_SAME", "3"))
 SYMBOLS = split(env("OKX_SYMBOLS", "BTCUSDT,ETHUSDT,SOLUSDT") if OKX_DEMO else
                 env("SYMBOLS", "US500,NAS100,GER40,EURUSD,GBPUSD,AUDUSD,NZDUSD,XAUUSD"))
@@ -628,11 +630,22 @@ def wt_extreme_cross(wt1, wt2, i):
     return None
 
 
-def swept_today(df, wt1, i, side, level, sess_start, max_back=200):
-    """Чи дно (вершина) поточної зони WT пробило PDL (PDH) саме сьогодні."""
+def zone_start(wt1, i, side, max_back=200):
+    """Індекс свічки ПЕРЕД початком дна (вершини): зона WT + хвиля, якою WT падав (ріс) у зону.
+    WT запізнюється, тож свічка, що зробила дно (тінь/свіп), часто ще поза зоною — її теж рахуємо (до 20 свічок)."""
     j = i - 1
     while j > 0 and i - j < max_back and ((wt1.iloc[j] <= WT_OS) if side == "LONG" else (wt1.iloc[j] >= WT_OB)):
         j -= 1
+    k = j
+    while k > 0 and i - k < max_back and k > j - 20 and (
+            (wt1.iloc[k] < wt1.iloc[k - 1]) if side == "LONG" else (wt1.iloc[k] > wt1.iloc[k - 1])):
+        k -= 1
+    return k
+
+
+def swept_today(df, wt1, i, side, level, sess_start, max_back=200):
+    """Чи дно (вершина) поточної зони WT пробило PDL (PDH) саме сьогодні."""
+    j = zone_start(wt1, i, side, max_back)
     seg = df.iloc[j + 1: i + 1]
     seg = seg[seg.index >= sess_start]
     if seg.empty:
@@ -642,9 +655,7 @@ def swept_today(df, wt1, i, side, level, sess_start, max_back=200):
 
 def zone_extreme(df, wt1, i, side, max_back=200):
     """Дно/вершина: мінімум (максимум) свічок, поки WT був у зоні перед сигналом, + свічка сигналу."""
-    j = i - 1
-    while j > 0 and i - j < max_back and ((wt1.iloc[j] <= WT_OS) if side == "LONG" else (wt1.iloc[j] >= WT_OB)):
-        j -= 1
+    j = zone_start(wt1, i, side, max_back)
     seg = df.iloc[j + 1: i + 1]
     return float(seg["low"].min()) if side == "LONG" else float(seg["high"].max())
 
@@ -866,6 +877,8 @@ def check_cycle(cache, ctx, state, first=False):
                     lvl = c["pdl"] if side == "LONG" else c["pdh"]
                     back = (df["close"].iloc[i] > lvl) if side == "LONG" else (df["close"].iloc[i] < lvl)
                     swept = swept and back  # свіп = зняли рівень І повернулись за нього; пробій без повернення — не свіп
+                    if with_bias and CTX_ENTRY == "fvg" and tf != "1D":
+                        continue  # у бік контексту входимо лише по закріпу за FVG (нижче)
                     if with_bias:
                         kind = "ctx"
                     elif REVERSAL_ALERTS and tf != "1D" and swept_today(df, wt1, i, side, lvl,
@@ -880,6 +893,20 @@ def check_cycle(cache, ctx, state, first=False):
                         continue
                     sent.append(key)
                     hits[kind].append((tf, side, df, wt1, wt2, i, ext, swept))
+                if CTX_ENTRY == "fvg" and tf != "1D" and c["bias"] in ("BULL", "BEAR"):
+                    fside = "LONG" if c["bias"] == "BULL" else "SHORT"
+                    for i, ext2, flo, fhi in fvg_entry_signal(df, wt1, fside):
+                        if i < len(df) - 3 or now - (df.index[i] + dur) > dur * 2 + pd.Timedelta(minutes=10):
+                            continue
+                        key = f"{sym}|{tf}|{int(df.index[i].timestamp())}|{fside}|fvgctx"
+                        if key in sent:
+                            continue
+                        sent.append(key)
+                        lvl = c["pdl"] if fside == "LONG" else c["pdh"]
+                        sess_start = c["days"].index[-1] + pd.Timedelta(hours=24)
+                        sw = (ext2 < lvl if fside == "LONG" else ext2 > lvl) and \
+                             ((df["close"].iloc[i] > lvl) if fside == "LONG" else (df["close"].iloc[i] < lvl))
+                        hits["ctx"].append((tf, fside, df, wt1, wt2, i, ext2, bool(sw), (flo, fhi)))
                 if COUNTER_FVG and tf != "1D" and c["bias"] in ("BULL", "BEAR"):
                     cside = "SHORT" if c["bias"] == "BULL" else "LONG"
                     for i, ext2, flo, fhi in fvg_entry_signal(df, wt1, cside):
@@ -1081,10 +1108,14 @@ def htf_line(htf):
 def send_signal(sym, c, hits, side, kind, cache=None, state=None):
     """Одне повідомлення на інструмент/напрямок; графік зі старшого ТФ."""
     hits.sort(key=lambda h: TF_MIN[h[0]])
-    tf_top, _, df_top, _, _, i_top, ext_top, _ = hits[-1]
+    tf_top, _, df_top, _, _, i_top, ext_top, _ = hits[-1][:8]
     icon = "🟢" if side == "LONG" else "🔴"
     long_ = side == "LONG"
     where = f"вийшов з дна (перетнув {WT_OS:.0f} вгору)" if long_ else f"вийшов з вершини (перетнув {WT_OB:.0f} вниз)"
+    fv = hits[-1][8] if len(hits[-1]) > 8 else None
+    if fv:
+        where = (f"сформував {'дно' if long_ else 'вершину'}, тіло закрилось {'вище' if long_ else 'нижче'} "
+                 f"FVG {fmt(fv[0])}–{fmt(fv[1])} (закріп)")
     tfs = ", ".join(TF_LABEL[h[0]] for h in hits)
     ext_name = "дно" if long_ else "вершина"
     wts = "\n".join(f"   {TF_LABEL[h[0]]}: WT {h[3].iloc[h[5]]:.0f} · {ext_name} {fmt(h[6])}" for h in hits)
@@ -1214,7 +1245,11 @@ def fvg_entry_signal(df, w1, side):
     for i in range(2, len(c)):
         if w[i] <= os_:
             if not active or w[i - 1] > os_:
-                active, dno, zs, used = True, l[i], i, False
+                # дно = мінімум і хвилі, якою WT падав у зону (свічка зі свіпом часто ще поза зоною)
+                k = i - 1
+                while k > 0 and k > i - 21 and w[k] < w[k - 1]:
+                    k -= 1
+                active, dno, zs, used = True, float(l[k:i + 1].min()), i, False
             else:
                 dno = min(dno, l[i])
         elif active:
