@@ -53,9 +53,12 @@ class Side:
         self.base = None
         self.t0 = None
         self.zone_tfs = set()
+        self.trig = None
 
 
-def run_variant(D, atr_at, bias_at, NEAR, ENTRY_TF, EXIT, CTX):
+def run_variant(D, atr_at, bias_at, NEAR, ENTRY_TF, EXIT, CTX, FROM="base", EXIT_REF="base", EXIT_OFF=0):
+    """FROM: з якого ТФ шукати FVG для закріпу — "base" (найстарший ТФ із дном) або "trig" (ТФ тригера, вгору).
+    EXIT_REF/EXIT_OFF: вихід на реверсі з базовим ТФ ≥ (ТФ бази або ТФ FVG входу) − EXIT_OFF."""
     """Повертає список угод."""
     ti = {tf: 0 for tf in TFS}            # скільки свічок кожного ТФ уже закрито
     tm = D["1m"]["t"]
@@ -93,12 +96,14 @@ def run_variant(D, atr_at, bias_at, NEAR, ENTRY_TF, EXIT, CTX):
                     lows = (a["l"][kk:j + 1] if sg == 1 else -a["h"][kk:j + 1])
                     d0 = float(lows.min())
                     if not st.active:
-                        st.active, st.dno, st.base, st.t0, st.zone_tfs = True, d0, tf, t, {tf}
+                        st.active, st.dno, st.base, st.t0, st.zone_tfs, st.trig = True, d0, tf, t, {tf}, tf
                     else:
                         st.dno = min(st.dno, d0)
                         st.zone_tfs.add(tf)
                         if TFS.index(tf) > TFS.index(st.base):
                             st.base = tf
+                        if TFS.index(tf) < TFS.index(st.trig):
+                            st.trig = tf
         # 2) злам/зсув дна і перевірка закріпу (FVG — у стані ДО цієї свічки, як у боті)
         sig_now = []
         for sg in (1, -1):
@@ -112,7 +117,7 @@ def run_variant(D, atr_at, bias_at, NEAR, ENTRY_TF, EXIT, CTX):
                 continue
             if l1 < st.dno:
                 st.dno = l1
-            bi = TFS.index(st.base)
+            bi = TFS.index(st.base) if FROM == "base" else TFS.index(st.trig)
             if not any(tf in closed_set for tf in TFS[bi:]):
                 continue
             atr = atr_at(t)
@@ -127,10 +132,10 @@ def run_variant(D, atr_at, bias_at, NEAR, ENTRY_TF, EXIT, CTX):
                 top = max(x[0] for x in cands)
                 need = min((x for x in cands if x[0] == top), key=lambda x: x[2][0])
             else:
-                own = [f for f in fv[sg][st.base] if f[3] >= st.t0 and f[0] > st.dno]
+                own = [f for f in fv[sg][TFS[bi]] if f[3] >= st.t0 and f[0] > st.dno]
                 if not own:
                     continue
-                need = (bi, st.base, min(own, key=lambda f: f[0]))
+                need = (bi, TFS[bi], min(own, key=lambda f: f[0]))
             etf = need[1] if ENTRY_TF == "fvg" else st.base
             if etf not in closed_set:
                 continue
@@ -165,7 +170,8 @@ def run_variant(D, atr_at, bias_at, NEAR, ENTRY_TF, EXIT, CTX):
                 pos = None
         if pos is not None:
             for sg, base, ftf, price, dno in sig_now:
-                if sg == -pos["sg"] and (EXIT == "any" or TFS.index(base) >= TFS.index(pos["base"])):
+                ref = TFS.index(pos["base"] if EXIT_REF == "base" else pos["ftf"]) - EXIT_OFF
+                if sg == -pos["sg"] and (EXIT == "any" or TFS.index(base) >= ref):
                     pos.update(exit=price, r=pos["sg"] * (price - pos["entry"]) / pos["R"], how="реверс", t1=int(t))
                     trades.append(pos)
                     pos = None
@@ -204,13 +210,14 @@ def stats(rr):
 def run(src):
     now = pd.Timestamp.now(tz="UTC")
     okx = src if type(src).__name__ == "OkxSource" else getattr(src, "okx", None)
+    # (назва, NEAR, ENTRY_TF, EXIT, CTX, FROM, EXIT_REF, EXIT_OFF)
     variants = [
-        ("A: закріп на ТФ FVG · вихід будь-який реверс · поруч 1.5 ATR", 1.5, "fvg", "any", 1),
-        ("B: закріп на базовому ТФ · будь-який реверс · 1.5 ATR", 1.5, "base", "any", 1),
-        ("C: як A, вихід лише реверс ≥ базового ТФ", 1.5, "fvg", "base", 1),
-        ("D: як A, поруч 3 ATR", 3.0, "fvg", "any", 1),
-        ("E: як C, поруч 3 ATR", 3.0, "fvg", "base", 1),
-        ("F: як C, без фільтра контексту", 1.5, "fvg", "base", 0),
+        ("C: FVG від базового ТФ · вихід реверс ≥ бази", 1.5, "fvg", "base", 1, "base", "base", 0),
+        ("C1: FVG від базового ТФ · вихід реверс ≥ бази−1", 1.5, "fvg", "base", 1, "base", "base", 1),
+        ("G: FVG від ТФ тригера · вихід реверс ≥ ТФ входу", 1.5, "fvg", "base", 1, "trig", "ftf", 0),
+        ("H: FVG від ТФ тригера · вихід реверс ≥ ТФ входу−1", 1.5, "fvg", "base", 1, "trig", "ftf", 1),
+        ("J: FVG від ТФ тригера · вихід реверс ≥ бази", 1.5, "fvg", "base", 1, "trig", "base", 0),
+        ("A: FVG від базового ТФ · вихід будь-який реверс", 1.5, "fvg", "any", 1, "base", "base", 0),
     ]
     allres = {v[0]: [] for v in variants}
     for sym in bot.SYMBOLS:
@@ -235,8 +242,8 @@ def run(src):
             return bias[k] if 0 <= k < len(bias) else None
 
         print(f"{sym}: хвилинок {len(m1)} з {m1.index[0]} по {m1.index[-1]}")
-        for name, near, etf, ex, ctx in variants:
-            tr = run_variant(D, atr_at, bias_at, near, etf, ex, ctx)
+        for name, near, etf, ex, ctx, frm, eref, eoff in variants:
+            tr = run_variant(D, atr_at, bias_at, near, etf, ex, ctx, frm, eref, eoff)
             for x in tr:
                 x["sym"] = sym
                 x["rf"] = x["r"] - FEE * x["entry"] / x["R"]

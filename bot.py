@@ -1935,7 +1935,8 @@ def main():
         import bt3
         bt3.run(src)
     elif mode == "mtf":
-        os.environ.setdefault("OKX_MAX_PAGES", "900")
+        os.environ.setdefault("BT_M1_DAYS", "180")
+        os.environ.setdefault("OKX_MAX_PAGES", "2700")
         os.environ["BT7"] = "1"
         import mtf
         mtf.run(src)

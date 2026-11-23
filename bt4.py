@@ -25,7 +25,7 @@ EXIT = {"1m": "5m", "2m": "5m", "3m": "15m", "5m": "15m", "15m": "1H", "30m": "4
 HORIZON_D = {"1m": 2, "2m": 2, "3m": 2, "5m": 3, "15m": 5, "30m": 7, "1H": 10, "2H": 15, "4H": 25}
 KS = [0.0] if os.environ.get("BT6") else [0.0, 0.5, 1.0, 1.5, 2.0]
 COSTF = {"EURUSD": 0.00012, "GBPUSD": 0.00016, "AUDUSD": 0.00012, "NZDUSD": 0.00016}
-OKX_DAYS = {"1m": 60, "5m": 180, "1H": 365}
+OKX_DAYS = {"1m": int(os.environ.get("BT_M1_DAYS", "60")), "5m": 180, "1H": 365}
 YH_DAYS = {"1m": 28, "5m": 58, "1H": 365}
 
 
