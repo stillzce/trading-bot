@@ -227,10 +227,18 @@ def run(src):
                 if s:
                     entries.append(("WT", i, s, bot.zone_extreme(d, w1, i, s)))
             wv = w1.to_numpy()
-            for i, dno, _ in fvg_entries(h, l, c, wv, bot.WT_OS):
+            fvgb = {}
+            if os.environ.get("BT9"):  # лише FVG-входи, як у живому боті (з виправленим дном)
+                entries = []
+                for sd in ("LONG", "SHORT"):
+                    for i, ext9, flo, fhi in bot.fvg_entry_signal(d, w1, sd):
+                        if i >= 60:
+                            entries.append(("FVG", i, sd, float(ext9)))
+                            fvgb[(i, sd)] = (float(flo), float(fhi))
+            for i, dno, _ in ([] if os.environ.get("BT9") else fvg_entries(h, l, c, wv, bot.WT_OS)):
                 if i >= 60:
                     entries.append(("FVG", i, "LONG", dno))
-            for i, dno, _ in fvg_entries(-l, -h, -c, -wv, -bot.WT_OB):
+            for i, dno, _ in ([] if os.environ.get("BT9") else fvg_entries(-l, -h, -c, -wv, -bot.WT_OB)):
                 if i >= 60:
                     entries.append(("FVG", i, "SHORT", -dno))
             for etype, i, side, ext in entries:
@@ -393,14 +401,22 @@ def run(src):
                 else:
                     flip = bool(h[j0:i + 1].max() > s_pdh[k] and entry < s_pdh[k]) if j0 <= i else False
                 at = atr_tf[i]
+                feats = None
+                if os.environ.get("BT9"):
+                    import bt7
+                    feats = bt7.features(data, W, CL, tf, i, t, side, entry, ext, atr, fvgb.get((i, side)),
+                                         s_start[k], s_pdh[k], s_pdl[k], loc)
                 rows.append((sym, tf, etype, side, ctx, loc.strftime("%Y-%m-%d %H:%M"),
                              round(dA / atr, 3) if np.isfinite(dA) else 99.0,
                              round(dB / atr, 3) if np.isfinite(dB) else 99.0, res,
                              round(dB / at, 3) if np.isfinite(dB) and at > 0 else 99.0, flip,
-                             float(entry)))
+                             float(entry), feats))
         print(f"{sym} ({meta[sym]['src']}): записів {sum(1 for r in rows if r[0] == sym)} · {time.time() - t0:.0f} c")
     print("META", json.dumps(meta, ensure_ascii=False))
-    if os.environ.get("BT8"):
+    if os.environ.get("BT9"):
+        import bt7
+        bt7.report9(rows)
+    elif os.environ.get("BT8"):
         import bt7
         bt7.report8(rows)
     elif os.environ.get("BT7"):

@@ -162,3 +162,88 @@ def report8(rows):
             st = _st([r[8][0.0][4 + k] - FEE * r[11] / r[8][0.0][3] for r in rr])
             line[name] = [st["sumR"], st["PF"]] if st else None
         print("R8TF", json.dumps(line, ensure_ascii=False))
+
+
+# ------------------------------------------------------------------ bt9: адаптивні фільтри входу (FVG-закріп по контексту)
+def features(data, W, CL, tf, i, t, side, entry, ext, atr, fvg, s_start, pdh, pdl, loc):
+    long_ = side == "LONG"
+    sg = 1 if long_ else -1
+    w1 = W[tf][0].to_numpy()
+    lo = max(0, i - 40)
+    depth = float(w1[lo:i + 1].min()) if long_ else float(-w1[lo:i + 1].max())   # наскільки глибоко було дно WT
+    chase = sg * (entry - ext) / atr                                                  # як далеко від дна вхід (ATR M15)
+    fsize = (fvg[1] - fvg[0]) / atr if fvg else 0.0                                   # розмір FVG закріпу (ATR M15)
+    htf = {}
+    for t2 in ("15m", "1H"):
+        if t2 not in CL:
+            continue
+        k2 = int(np.searchsorted(CL[t2], t, side="right")) - 1
+        if k2 >= 1:
+            ww = W[t2][0].to_numpy()
+            htf[t2] = float(ww[k2] - ww[k2 - 1]) * sg   # > 0 — старший ТФ іде в бік угоди
+    h1 = data["1H"]
+    cl1 = CL["1H"]
+    m = (cl1 > np.int64(pd.Timestamp(s_start).value)) & (cl1 <= t)
+    closes = h1["close"].to_numpy()[m]
+    broken = bool((closes > pdh).any()) if not long_ else bool((closes < pdl).any())
+    return {"depth": round(depth, 1), "chase": round(float(chase), 3), "fsize": round(float(fsize), 3),
+            "m15": round(htf.get("15m", 0.0), 2), "h1": round(htf.get("1H", 0.0), 2), "broken": broken,
+            "hour": int(loc.hour)}
+
+
+def report9(rows):
+    rows.sort(key=lambda r: r[5])
+    sel = [r for r in rows if r[2] == "FVG" and r[4] == "with" and r[8].get(0.0) and r[12]]
+    print("ROWS9", len(sel), "з", sel[0][5] if sel else "-", "по", sel[-1][5] if sel else "-")
+
+    def val(r):
+        Rk = r[8][0.0]
+        return Rk[1] - FEE * r[11] / Rk[3]
+
+    F = {
+        "база": lambda r, f: True,
+        "чистий шлях ≥1 ATR": lambda r, f: r[7] >= 1.0,
+        "чистий шлях ≥1.5 ATR": lambda r, f: r[7] >= 1.5,
+        "чистий шлях ≥2 ATR": lambda r, f: r[7] >= 2.0,
+        "не доганяти ≤1 ATR": lambda r, f: f["chase"] <= 1.0,
+        "не доганяти ≤0.5 ATR": lambda r, f: f["chase"] <= 0.5,
+        "глибина WT ≥65": lambda r, f: f["depth"] >= 65,
+        "глибина WT ≥75": lambda r, f: f["depth"] >= 75,
+        "FVG ≥0.1 ATR": lambda r, f: f["fsize"] >= 0.1,
+        "FVG ≥0.25 ATR": lambda r, f: f["fsize"] >= 0.25,
+        "M15 не проти": lambda r, f: f["m15"] >= 0,
+        "M15 і H1 не проти": lambda r, f: f["m15"] >= 0 and f["h1"] >= 0,
+        "контекст не зламаний": lambda r, f: not f["broken"],
+        "без 01–07 Київ": lambda r, f: not (1 <= f["hour"] < 7),
+    }
+    groups = {"M1–M3": ("1m", "2m", "3m"), "M5–M15": ("5m", "15m"), "M30–H4": ("30m", "1H", "2H", "4H")}
+    for gname, tfs in groups.items():
+        rr = [r for r in sel if r[1] in tfs]
+        for fname, f in F.items():
+            st = _st([val(r) for r in rr if f(r, r[12])])
+            print("R9", json.dumps({"g": gname, "f": fname, **(st or {})}, ensure_ascii=False))
+    # комбінації — жадібно: додаємо фільтр, якщо він покращує суму R з комісією
+    for gname, tfs in groups.items():
+        rr = [r for r in sel if r[1] in tfs]
+        chosen, cur = [], [r for r in rr]
+        base = sum(val(r) for r in cur)
+        while True:
+            best = None
+            for fname, f in F.items():
+                if fname == "база" or fname in chosen:
+                    continue
+                sub = [r for r in cur if f(r, r[12])]
+                if len(sub) < 30:
+                    continue
+                sm = sum(val(r) for r in sub)
+                if sm > base + 5 and (best is None or sm > best[1]):
+                    best = (fname, sm, sub)
+            if not best:
+                break
+            chosen.append(best[0])
+            cur, base = best[2], best[1]
+        st = _st([val(r) for r in cur])
+        half = len(cur) // 2
+        print("R9C", json.dumps({"g": gname, "filters": chosen, **(st or {}),
+                                 "h1": round(sum(val(r) for r in cur[:half]), 1),
+                                 "h2": round(sum(val(r) for r in cur[half:]), 1)}, ensure_ascii=False))

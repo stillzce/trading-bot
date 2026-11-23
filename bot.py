@@ -1934,9 +1934,12 @@ def main():
             os.environ["BT_DAYS"] = arg
         import bt3
         bt3.run(src)
-    elif mode in ("bt4", "bt5", "bt6", "bt7", "bt8"):
+    elif mode in ("bt4", "bt5", "bt6", "bt7", "bt8", "bt9"):
         if mode == "bt8":
             os.environ["BT8"] = "1"
+            mode = "bt7"
+        if mode == "bt9":
+            os.environ["BT9"] = "1"
             mode = "bt7"
         if mode == "bt7":
             os.environ["BT7"] = "1"
