@@ -60,7 +60,7 @@ class Engine:
     """Мультитаймфреймовий детектор сигналів для одного активу. Отримує закриті свічки по черзі (step).
     Сигнал: (sg, base, ftf, ціна, дно, [ТФ із дном], (низ FVG, верх FVG))."""
 
-    def __init__(self, NEAR=1.5, ENTRY_TF="fvg", FROM="trig", MIN_BASE="1m", FRESH=True):
+    def __init__(self, NEAR=1.5, ENTRY_TF="fvg", FROM="trig", MIN_BASE="1m", FRESH=False):
         self.NEAR, self.ENTRY_TF, self.FROM, self.MIN_BASE, self.FRESH = NEAR, ENTRY_TF, FROM, MIN_BASE, FRESH
         self.S = {1: Side(1), -1: Side(-1)}
         # FVG проти: [низ, верх, межа закріпу, t утворення] у «лонгових» (для шорта — дзеркальних) координатах
@@ -186,7 +186,7 @@ class Engine:
 
 
 def run_variant(D, atr_at, bias_at, NEAR, ENTRY_TF, EXIT, CTX, FROM="base", EXIT_REF="base", EXIT_OFF=0,
-                MIN_BASE="1m", FRESH=True):
+                MIN_BASE="1m", FRESH=False):
     """Бектест однієї конфігурації на рушії Engine. Одна позиція на актив."""
     eng = Engine(NEAR, ENTRY_TF, FROM, MIN_BASE, FRESH)
     ti = {tf: 0 for tf in TFS}
