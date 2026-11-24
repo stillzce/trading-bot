@@ -241,9 +241,12 @@ class Engine:
 
 
 def run_variant(D, atr_at, bias_at, NEAR, ENTRY_TF, EXIT, CTX, FROM="base", EXIT_REF="base", EXIT_OFF=0,
-                MIN_BASE="1m", FRESH=False):
-    """Бектест однієї конфігурації на рушії Engine. Одна позиція на актив."""
-    eng = Engine(NEAR, ENTRY_TF, FROM, MIN_BASE, FRESH)
+                MIN_BASE="1m", FRESH=False, RELAX_TF=None, XENG=False):
+    """Бектест однієї конфігурації на рушії Engine. Одна позиція на актив.
+    CTX: 1 — лише в бік контексту; 0 — без контексту; 2 — проти контексту лише з базою ≥ M15.
+    XENG: реверсні виходи шукає окремий рушій за старими правилами (як у живому боті)."""
+    eng = Engine(NEAR, ENTRY_TF, FROM, MIN_BASE, FRESH, RELAX_TF)
+    xeng = Engine(NEAR, ENTRY_TF, FROM, MIN_BASE, False, None) if XENG else None
     ti = {tf: 0 for tf in TFS}
     tm = D["1m"]["t"]
     a1 = D["1m"]
@@ -257,7 +260,10 @@ def run_variant(D, atr_at, bias_at, NEAR, ENTRY_TF, EXIT, CTX, FROM="base", EXIT
             if j < len(arr["t"]) and arr["t"][j] <= t:
                 ti[tf] = j + 1
                 closed[tf] = (arr["h"][j], arr["l"][j], arr["c"][j], arr["w"][j])
-        sig_now = eng.step(t, closed, (a1["h"][k], a1["l"][k], a1["c"][k]), atr_at(t))
+        m1b = (a1["h"][k], a1["l"][k], a1["c"][k])
+        at = atr_at(t)
+        sig_now = eng.step(t, closed, m1b, at)
+        x_now = xeng.step(t, closed, m1b, at) if xeng is not None else []
         if pos is not None:
             lo = a1["l"][k] if pos["sg"] == 1 else a1["h"][k]
             if (pos["sg"] == 1 and lo <= pos["stop"]) or (pos["sg"] == -1 and lo >= pos["stop"]):
@@ -265,7 +271,7 @@ def run_variant(D, atr_at, bias_at, NEAR, ENTRY_TF, EXIT, CTX, FROM="base", EXIT
                 trades.append(pos)
                 pos = None
         if pos is not None:
-            for sg, base, ftf, price, dno, _, _ in sig_now:
+            for sg, base, ftf, price, dno, _, _ in x_now + sig_now:
                 ref = TFS.index(pos["base"] if EXIT_REF == "base" else pos["ftf"]) - EXIT_OFF
                 if sg == -pos["sg"] and (EXIT == "any" or TFS.index(base) >= ref):
                     pos.update(exit=price, r=pos["sg"] * (price - pos["entry"]) / pos["R"], how="реверс", t1=int(t))
@@ -281,13 +287,17 @@ def run_variant(D, atr_at, bias_at, NEAR, ENTRY_TF, EXIT, CTX, FROM="base", EXIT
             if pos is not None:
                 break
             b = bias_at(t)
-            if CTX and b != ("BULL" if sg == 1 else "BEAR"):
+            with_ctx = b == ("BULL" if sg == 1 else "BEAR")
+            if CTX == 1 and not with_ctx:
+                continue
+            if CTX == 2 and not with_ctx and TFS.index(base) < TFS.index("15m"):
                 continue
             stop = dno - sg * price * 0.0001
             R = sg * (price - stop)
             if R <= price * 0.0003:
                 continue
-            pos = {"sg": sg, "entry": price, "stop": stop, "R": R, "base": base, "ftf": ftf, "t0": int(t)}
+            pos = {"sg": sg, "entry": price, "stop": stop, "R": R, "base": base, "ftf": ftf, "t0": int(t),
+                   "ctx": with_ctx}
     return trades
 
 
@@ -305,10 +315,12 @@ def stats(rr):
 def run(src):
     now = pd.Timestamp.now(tz="UTC")
     okx = src if type(src).__name__ == "OkxSource" else getattr(src, "okx", None)
-    # (назва, NEAR, ENTRY_TF, EXIT, CTX, FROM, EXIT_REF, EXIT_OFF, MIN_BASE, FRESH)
+    # (назва, CTX, нова версія?)
     variants = [
-        ("J3 як було: дно/вершина за весь сетап (до 3 днів)", 1.5, "fvg", "base", 1, "trig", "base", 0, "3m", False),
-        ("J3 нове: новий екстремум — новий сетап", 1.5, "fvg", "base", 1, "trig", "base", 0, "3m", True),
+        ("СТАРА J3 (23.11), лише в бік контексту", 1, False),
+        ("ЖИВА (25.11), лише в бік контексту", 1, True),
+        ("ЖИВА, без контексту", 0, True),
+        ("ЖИВА, проти контексту лише з базою ≥ M15", 2, True),
     ]
     allres = {v[0]: [] for v in variants}
     for sym in bot.SYMBOLS:
@@ -333,8 +345,12 @@ def run(src):
             return bias[k] if 0 <= k < len(bias) else None
 
         print(f"{sym}: хвилинок {len(m1)} з {m1.index[0]} по {m1.index[-1]}")
-        for name, near, etf, ex, ctx, frm, eref, eoff, mb, fr in variants:
-            tr = run_variant(D, atr_at, bias_at, near, etf, ex, ctx, frm, eref, eoff, mb, fr)
+        for name, ctx, new in variants:
+            if new:
+                tr = run_variant(D, atr_at, bias_at, 1.5, "fvg", "base", ctx, "trig", "base", 0, "3m",
+                                 True, "15m", True)
+            else:
+                tr = run_variant(D, atr_at, bias_at, 1.5, "fvg", "base", ctx, "trig", "base", 0, "3m")
             for x in tr:
                 x["sym"] = sym
                 x["rf"] = x["r"] - FEE * x["entry"] / x["R"]
@@ -346,6 +362,8 @@ def run(src):
         out["byBase"] = {tf: stats([x["rf"] for x in tr if x["base"] == tf]) for tf in TFS}
         out["byFvgTf"] = {tf: stats([x["rf"] for x in tr if x["ftf"] == tf]) for tf in TFS}
         out["bySym"] = {s: stats([x["rf"] for x in tr if x["sym"] == s]) for s in bot.SYMBOLS}
+        out["byCtx"] = {"з контекстом": stats([x["rf"] for x in tr if x.get("ctx")]),
+                        "проти": stats([x["rf"] for x in tr if x.get("ctx") is False])}
         out["how"] = {h: sum(1 for x in tr if x["how"] == h) for h in ("стоп", "реверс", "час")}
         out["feeR_avg"] = round(float(np.mean([x["r"] - x["rf"] for x in tr])), 3) if tr else None
         half = len(tr) // 2
