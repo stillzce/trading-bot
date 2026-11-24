@@ -1745,6 +1745,7 @@ def run_loop_always(src):
     """24/7 (демо OKX): без вихідних і без закриття угод на ніч. Контекст оновлюється з новою добою,
     підсумок дня — о SUMMARY_AT (за замовчуванням 23:55 Київ)."""
     deadline = datetime.now(LOCAL_TZ) + timedelta(minutes=RUN_MINUTES)
+    print(f"Старт 24/7 до {deadline:%H:%M}, модель {MODEL}", flush=True)
     summary_at = env("SUMMARY_AT", "23:55")
     cache = BarCache(src)
     state = load_state()
@@ -1982,6 +1983,7 @@ def main():
         try:
             TRADER = OkxDemoTrader(inst, notify=lambda text, reply_to=None: send_text(text, reply_to))
         except Exception as e:
+            print(f"OKX init: {e}", flush=True)
             send_text(f"⚠️ Не вдалося підключитись до демо-рахунку OKX: {e}\n"
                       f"Спробую знову з наступним запуском (щогодини).")
             return
