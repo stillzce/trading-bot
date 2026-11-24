@@ -71,6 +71,8 @@ class Engine:
         self.hist = {tf: {"h": [], "l": [], "w": []} for tf in TFS}   # останні свічки для «хвилі» дна
         self.last = {tf: None for tf in TFS}                           # час закриття останньої обробленої свічки
         self.dbg = None                                                # список для діагностики (mtfdebug)
+        self.pf = {tf: None for tf in TFS}                             # свічка, що формується: [high, low] з хвилинок
+        self.STRONG = "15m"                                            # «старший» FVG — від цього ТФ
 
     def step(self, t, closed, m1, atr):
         """t — час (хвилини від epoch) закриття; closed — {tf: (h, l, c, w)} свічок, що закрились у t;
@@ -112,6 +114,13 @@ class Engine:
                             st.base = tf
                         if TFS.index(tf) < TFS.index(st.trig):
                             st.trig = tf
+        # свічки, що формуються (з хвилинок): для «потенційних» FVG
+        for tf in TFS[1:]:
+            if tf in closed:
+                self.pf[tf] = None
+            elif m1 is not None and self.last[tf] is not None:
+                p = self.pf[tf]
+                self.pf[tf] = [m1[0], m1[1]] if p is None else [max(p[0], m1[0]), min(p[1], m1[1])]
         # 2) злам/зсув дна і закріп (FVG — у стані ДО цієї свічки)
         sigs = []
         for sg in (1, -1):
@@ -148,12 +157,19 @@ class Engine:
                 for f in self.fv[sg][tf]:
                     if f[0] > st.dno and f[0] - c1 <= self.NEAR * atr:
                         cands.append((TFS.index(tf), tf, f))
+            si = max(TFS.index(self.STRONG), TFS.index(st.base))
             if cands and self.FRESH:
-                # старший FVG перебиває молодший лише там, де він перекриває найближчий FVG (а не далі по ходу)
+                # старший FVG перебиває молодший там, де він перекриває найближчий FVG (а не далі по ходу)
                 near = min(cands, key=lambda x: x[2][0])
                 group = [x for x in cands if x[2][0] <= near[2][1] + 0.1 * atr]
                 top = max(x[0] for x in group)
                 need = min((x for x in group if x[0] == top), key=lambda x: x[2][0])
+                if top < TFS.index(self.STRONG):
+                    # найближчий FVG дрібний (M1–M5): якщо поруч є FVG M15+ (не молодший бази) — потрібен він
+                    strong = [x for x in cands if x[0] >= si]
+                    if strong:
+                        top2 = max(x[0] for x in strong)
+                        need = min((x for x in strong if x[0] == top2), key=lambda x: x[2][0])
             elif cands:
                 top = max(x[0] for x in cands)
                 need = min((x for x in cands if x[0] == top), key=lambda x: x[2][0])
@@ -162,6 +178,24 @@ class Engine:
                 if not own:
                     continue
                 need = (bi, TFS[bi], min(own, key=lambda f: f[0]))
+            if self.FRESH and need[0] < TFS.index(self.STRONG):
+                # потенційний FVG M15+: свічка ще формується, а розрив над ціною вже є — чекаємо її закриття
+                pot = None
+                for tf in TFS[si:]:
+                    p = self.pf[tf]
+                    H = self.hist[tf]
+                    if p is None or len(H["h"]) < 2:
+                        continue
+                    ph = p[0] if sg == 1 else -p[1]
+                    l2 = H["l"][-2] if sg == 1 else -H["h"][-2]
+                    if ph < l2 and ph > st.dno and ph - c1 <= self.NEAR * atr:
+                        pot = (tf, ph * sg, l2 * sg)
+                if pot:
+                    if self.dbg is not None:
+                        self.dbg.append((t, sg, f"чекаю закриття {pot[0]} — потенційний FVG",
+                                         dict(base=st.base, zones=sorted(st.zone_tfs, key=TFS.index), dno=st.dno * sg,
+                                              pot=sorted(pot[1:]))))
+                    continue
             if low_base and TFS.index(need[1]) < TFS.index(self.RELAX_TF):
                 if self.dbg is not None:
                     self.dbg.append((t, sg, f"база {st.base} нижче {self.MIN_BASE}, а FVG лише {need[1]}",
