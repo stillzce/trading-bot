@@ -121,9 +121,15 @@ class Engine:
             if m1 is not None:
                 l1 = m1[1] if sg == 1 else -m1[0]
                 c1 = m1[2] * sg
-                if c1 < st.dno or t - st.t0 > 3 * 24 * 60:
+                if t - st.t0 > 3 * 24 * 60:
                     st.reset()
                     continue
+                if c1 < st.dno:
+                    if self.FRESH and any(self.inzone[sg][x] for x in TFS):
+                        st.dno = l1             # WT ще в зоні — тіло нижче дна лише переносить дно (вершину)
+                    else:
+                        st.reset()
+                        continue
                 if l1 < st.dno:
                     st.dno = l1
             else:
