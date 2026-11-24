@@ -62,6 +62,9 @@ CTX_ENTRY = env("CTX_ENTRY", "fvg" if OKX_DEMO else "wt")
 # вихід на реверсі з базою ≥ бази входу); "classic" — по одному ТФ, як раніше
 MODEL = env("MODEL", "mtf" if OKX_DEMO else "classic")
 MTF_MIN_BASE = env("MTF_MIN_BASE", "3m")   # дно має підтвердитись щонайменше на цьому ТФ
+MTF_RELAX_TF = env("MTF_RELAX_TF", "15m")  # …або закріп за FVG щонайменше цього ТФ (тоді досить дна на M1)
+MTF_FRESH = env("MTF_FRESH", "1") == "1"   # новий екстремум — новий сетап (для входів)
+MTF_EXIT_ENG = {}  # sym -> рушій для реверсних виходів (правила як були: екстремум за сетап, дно ≥ M3)
 MAX_SAME = int(env("MAX_SAME", "3"))
 SYMBOLS = split(env("OKX_SYMBOLS", "BTCUSDT,ETHUSDT,SOLUSDT") if OKX_DEMO else
                 env("SYMBOLS", "US500,NAS100,GER40,EURUSD,GBPUSD,AUDUSD,NZDUSD,XAUUSD"))
@@ -1426,7 +1429,10 @@ def mtf_cycle(cache, ctx, state, first=False, live_from=None):
             continue
         eng = MTF_ENG.get(sym)
         if eng is None:
-            eng = MTF_ENG[sym] = mtf.Engine(1.5, "fvg", "trig", MTF_MIN_BASE)
+            eng = MTF_ENG[sym] = mtf.Engine(1.5, "fvg", "trig", MTF_MIN_BASE, MTF_FRESH, MTF_RELAX_TF)
+        xeng = MTF_EXIT_ENG.get(sym)
+        if xeng is None:
+            xeng = MTF_EXIT_ENG[sym] = mtf.Engine(1.5, "fvg", "trig", MTF_MIN_BASE, False, None)
         ev = {}
         for tf, d in dfs.items():
             w = wavetrend(d)[0].to_numpy()
@@ -1451,6 +1457,7 @@ def mtf_cycle(cache, ctx, state, first=False, live_from=None):
         for t in sorted(ev):
             m1bar = m1map.get(t)
             sigs = eng.step(t, ev[t], m1bar, atr_at(t))
+            xsigs = xeng.step(t, ev[t], m1bar, atr_at(t))
             if t < (now_min - 3 if live_from is None else live_from):  # прогрів / запізнілі сигнали — без дій
                 continue
             ts = pd.Timestamp(int(t) * 60_000_000_000, tz="UTC")
@@ -1461,7 +1468,7 @@ def mtf_cycle(cache, ctx, state, first=False, live_from=None):
                 if hit:
                     send_text(f"🛑 {sym} {tr['side']} (вхід {tr['t_open']}): стоп {fmt(tr['stop'])} — −1.0R", tr["mid"])
                     _close_trade(state, tr, -1.0, "стоп", ts)
-            for sg, base, ftf, price, dno, zt, fvg in sigs:
+            for sg, base, ftf, price, dno, zt, fvg in xsigs + sigs:
                 side = "LONG" if sg == 1 else "SHORT"
                 for tr in [x for x in state.get("trades", []) if x.get("mtf") and x["sym"] == sym
                            and x["side"] != side]:
@@ -1470,6 +1477,8 @@ def mtf_cycle(cache, ctx, state, first=False, live_from=None):
                         send_text(f"🔁 {sym} {tr['side']} (вхід {tr['t_open']}): реверс — сигнал {side} з базою "
                                   f"{TF_LABEL[base]} @{fmt(price)} → закриваю, {r:+.1f}R", tr["mid"])
                         _close_trade(state, tr, r, "реверс", ts)
+                if (sg, base, ftf, price, dno, zt, fvg) not in sigs:
+                    continue  # сигнали рушія виходів — лише для виходів
                 if c is None or c["bias"] != ("BULL" if sg == 1 else "BEAR"):
                     continue
                 if any(x.get("mtf") and x["sym"] == sym for x in state.get("trades", [])):
@@ -2073,7 +2082,8 @@ def main():
         import mtf
         for sym in syms.split(","):
             MTF_ENG.clear()
-            eng = MTF_ENG[sym] = mtf.Engine(1.5, "fvg", "trig", MTF_MIN_BASE)
+            MTF_EXIT_ENG.clear()
+            eng = MTF_ENG[sym] = mtf.Engine(1.5, "fvg", "trig", MTF_MIN_BASE, MTF_FRESH, MTF_RELAX_TF)
             eng.dbg = []
             globals()["SYMBOLS"] = [sym]
             st = {}

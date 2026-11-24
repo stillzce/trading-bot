@@ -60,8 +60,10 @@ class Engine:
     """Мультитаймфреймовий детектор сигналів для одного активу. Отримує закриті свічки по черзі (step).
     Сигнал: (sg, base, ftf, ціна, дно, [ТФ із дном], (низ FVG, верх FVG))."""
 
-    def __init__(self, NEAR=1.5, ENTRY_TF="fvg", FROM="trig", MIN_BASE="1m", FRESH=False):
+    def __init__(self, NEAR=1.5, ENTRY_TF="fvg", FROM="trig", MIN_BASE="1m", FRESH=False, RELAX_TF=None):
+        """RELAX_TF: дно/вершина нижче MIN_BASE теж годиться, якщо закріп — за FVG цього ТФ або старшого."""
         self.NEAR, self.ENTRY_TF, self.FROM, self.MIN_BASE, self.FRESH = NEAR, ENTRY_TF, FROM, MIN_BASE, FRESH
+        self.RELAX_TF = RELAX_TF
         self.S = {1: Side(1), -1: Side(-1)}
         # FVG проти: [низ, верх, межа закріпу, t утворення] у «лонгових» (для шорта — дзеркальних) координатах
         self.fv = {sg: {tf: [] for tf in TFS} for sg in (1, -1)}
@@ -126,7 +128,8 @@ class Engine:
                     st.dno = l1
             else:
                 c1 = None
-            if TFS.index(st.base) < TFS.index(self.MIN_BASE):
+            low_base = TFS.index(st.base) < TFS.index(self.MIN_BASE)
+            if low_base and not self.RELAX_TF:
                 if self.dbg is not None:
                     self.dbg.append((t, sg, "база нижче мінімуму", dict(base=st.base, zones=sorted(st.zone_tfs, key=TFS.index),
                                                                        dno=st.dno * sg)))
@@ -147,6 +150,12 @@ class Engine:
                 if not own:
                     continue
                 need = (bi, TFS[bi], min(own, key=lambda f: f[0]))
+            if low_base and TFS.index(need[1]) < TFS.index(self.RELAX_TF):
+                if self.dbg is not None:
+                    self.dbg.append((t, sg, f"база {st.base} нижче {self.MIN_BASE}, а FVG лише {need[1]}",
+                                     dict(base=st.base, zones=sorted(st.zone_tfs, key=TFS.index), dno=st.dno * sg,
+                                          need_tf=need[1])))
+                continue
             etf = need[1] if self.ENTRY_TF == "fvg" else st.base
             if self.dbg is not None:
                 self.dbg.append((t, sg, "чекаю закріп" if etf in closed else "ТФ закріпу ще не закрився",
