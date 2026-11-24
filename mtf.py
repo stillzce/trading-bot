@@ -148,7 +148,13 @@ class Engine:
                 for f in self.fv[sg][tf]:
                     if f[0] > st.dno and f[0] - c1 <= self.NEAR * atr:
                         cands.append((TFS.index(tf), tf, f))
-            if cands:
+            if cands and self.FRESH:
+                # старший FVG перебиває молодший лише там, де він перекриває найближчий FVG (а не далі по ходу)
+                near = min(cands, key=lambda x: x[2][0])
+                group = [x for x in cands if x[2][0] <= near[2][1] + 0.1 * atr]
+                top = max(x[0] for x in group)
+                need = min((x for x in group if x[0] == top), key=lambda x: x[2][0])
+            elif cands:
                 top = max(x[0] for x in cands)
                 need = min((x for x in cands if x[0] == top), key=lambda x: x[2][0])
             else:
