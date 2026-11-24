@@ -60,8 +60,8 @@ class Engine:
     """Мультитаймфреймовий детектор сигналів для одного активу. Отримує закриті свічки по черзі (step).
     Сигнал: (sg, base, ftf, ціна, дно, [ТФ із дном], (низ FVG, верх FVG))."""
 
-    def __init__(self, NEAR=1.5, ENTRY_TF="fvg", FROM="trig", MIN_BASE="1m"):
-        self.NEAR, self.ENTRY_TF, self.FROM, self.MIN_BASE = NEAR, ENTRY_TF, FROM, MIN_BASE
+    def __init__(self, NEAR=1.5, ENTRY_TF="fvg", FROM="trig", MIN_BASE="1m", FRESH=True):
+        self.NEAR, self.ENTRY_TF, self.FROM, self.MIN_BASE, self.FRESH = NEAR, ENTRY_TF, FROM, MIN_BASE, FRESH
         self.S = {1: Side(1), -1: Side(-1)}
         # FVG проти: [низ, верх, межа закріпу, t утворення] у «лонгових» (для шорта — дзеркальних) координатах
         self.fv = {sg: {tf: [] for tf in TFS} for sg in (1, -1)}
@@ -98,7 +98,10 @@ class Engine:
                     kk = max(kk, 0)
                     lows = H["l"][kk:j + 1] if sg == 1 else [-x for x in H["h"][kk:j + 1]]
                     d0 = float(min(lows))
-                    if not st.active:
+                    others = any(self.inzone[sg][x] for x in TFS if x != tf)
+                    # новий сетап: нічого не відкрито, або інші ТФ уже вийшли із зони, або нове дно вище за старе
+                    # (нова вершина нижча). Інакше — те саме дно росте на старших ТФ (або оновлюється нижче)
+                    if not st.active or (self.FRESH and (not others or d0 > st.dno)):
                         st.active, st.dno, st.base, st.t0, st.zone_tfs, st.trig = True, d0, tf, t, {tf}, tf
                     else:
                         st.dno = min(st.dno, d0)
@@ -183,9 +186,9 @@ class Engine:
 
 
 def run_variant(D, atr_at, bias_at, NEAR, ENTRY_TF, EXIT, CTX, FROM="base", EXIT_REF="base", EXIT_OFF=0,
-                MIN_BASE="1m"):
+                MIN_BASE="1m", FRESH=True):
     """Бектест однієї конфігурації на рушії Engine. Одна позиція на актив."""
-    eng = Engine(NEAR, ENTRY_TF, FROM, MIN_BASE)
+    eng = Engine(NEAR, ENTRY_TF, FROM, MIN_BASE, FRESH)
     ti = {tf: 0 for tf in TFS}
     tm = D["1m"]["t"]
     a1 = D["1m"]
@@ -247,11 +250,10 @@ def stats(rr):
 def run(src):
     now = pd.Timestamp.now(tz="UTC")
     okx = src if type(src).__name__ == "OkxSource" else getattr(src, "okx", None)
-    # (назва, NEAR, ENTRY_TF, EXIT, CTX, FROM, EXIT_REF, EXIT_OFF, MIN_BASE)
+    # (назва, NEAR, ENTRY_TF, EXIT, CTX, FROM, EXIT_REF, EXIT_OFF, MIN_BASE, FRESH)
     variants = [
-        ("J: FVG від ТФ тригера · вихід реверс ≥ бази", 1.5, "fvg", "base", 1, "trig", "base", 0, "1m"),
-        ("J3: як J, дно щонайменше на M3 (ЖИВА КОНФІГУРАЦІЯ)", 1.5, "fvg", "base", 1, "trig", "base", 0, "3m"),
-        ("J5: як J, дно щонайменше на M5", 1.5, "fvg", "base", 1, "trig", "base", 0, "5m"),
+        ("J3 як було: дно/вершина за весь сетап (до 3 днів)", 1.5, "fvg", "base", 1, "trig", "base", 0, "3m", False),
+        ("J3 нове: новий екстремум — новий сетап", 1.5, "fvg", "base", 1, "trig", "base", 0, "3m", True),
     ]
     allres = {v[0]: [] for v in variants}
     for sym in bot.SYMBOLS:
@@ -276,8 +278,8 @@ def run(src):
             return bias[k] if 0 <= k < len(bias) else None
 
         print(f"{sym}: хвилинок {len(m1)} з {m1.index[0]} по {m1.index[-1]}")
-        for name, near, etf, ex, ctx, frm, eref, eoff, mb in variants:
-            tr = run_variant(D, atr_at, bias_at, near, etf, ex, ctx, frm, eref, eoff, mb)
+        for name, near, etf, ex, ctx, frm, eref, eoff, mb, fr in variants:
+            tr = run_variant(D, atr_at, bias_at, near, etf, ex, ctx, frm, eref, eoff, mb, fr)
             for x in tr:
                 x["sym"] = sym
                 x["rf"] = x["r"] - FEE * x["entry"] / x["R"]
