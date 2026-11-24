@@ -348,8 +348,13 @@ class OkxDemoTrader:
         sym, side = t["sym"], t["side"]
         sp = self.specs.get(sym)
         inst = info["inst"]
-        info["closed"] = True
         err = ""
+        if sp and info.get("v") == 2 and info.get("algo") and not info.get("stopped"):
+            try:  # стоп на біржі міг спрацювати в ту ж хвилину — спершу врахувати його виконання
+                self.check_stop(state, t)
+            except Exception as e:
+                print(f"OKX перевірка стопу при закритті {inst}: {e}")
+        info["closed"] = True
         if sp:
             self._cancel_sl(sym, info.get("algo"))
             info["algo"] = None
