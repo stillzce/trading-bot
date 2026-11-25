@@ -209,7 +209,9 @@ class Engine:
                                       dno=st.dno * sg, need_tf=need[1],
                                       fvg=sorted((need[2][0] * sg, need[2][1] * sg)), edge=need[2][2] * sg,
                                       close=(closed[etf][2] if etf in closed else None),
-                                      cands=[(x[1], round(x[2][0] * sg, 4), round(x[2][2] * sg, 4)) for x in cands][:8])))
+                                      cands=[(x[1], round(x[2][0] * sg, 4), round(x[2][2] * sg, 4)) for x in cands][:8],
+                                      hi_fvg={tf: [sorted((round(f[0] * sg, 2), round(f[1] * sg, 2))) + [round(f[2] * sg, 2)]
+                                                   for f in self.fv[sg][tf]][-4:] for tf in ("30m", "1H", "4H")})))
             if etf not in closed:
                 continue
             ce = closed[etf][2] * sg
