@@ -213,6 +213,20 @@ class Engine:
             if etf not in closed:
                 continue
             ce = closed[etf][2] * sg
+            if ce > need[2][2] and self.FRESH:
+                # закріп не має закриватися всередині FVG проти нас старшого ТФ (або ближче 0.25 ATR до нього):
+                # тоді чекаємо закріпу і за ним
+                blk = None
+                for tf in TFS[need[0] + 1:]:
+                    for f in self.fv[sg][tf]:
+                        if f[0] - 0.25 * atr <= ce <= f[2] and f[0] > st.dno:
+                            blk = (tf, f)
+                if blk:
+                    if self.dbg is not None:
+                        self.dbg.append((t, sg, f"закріп усередині FVG {blk[0]} — чекаю закріп за ним",
+                                         dict(base=st.base, dno=st.dno * sg, need_tf=need[1], close=ce * sg,
+                                              blk=sorted((blk[1][0] * sg, blk[1][1] * sg)))))
+                    continue
             if ce > need[2][2]:
                 f = need[2]
                 lo, hi = sorted((f[0] * sg, f[1] * sg))
