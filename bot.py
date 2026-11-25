@@ -1461,7 +1461,7 @@ def _close_trade(state, t, total, how, when):
     state["trades"] = [x for x in state.get("trades", []) if x is not t]
 
 
-MTF_TFS = ["1m", "3m", "5m", "15m", "30m", "1H", "4H"]
+MTF_TFS = ["1m", "3m", "5m", "15m", "30m", "1H", "2H", "4H"]
 MTF_ENG = {}  # sym -> mtf.Engine (у пам'яті; при старті прогрівається на історії)
 
 
