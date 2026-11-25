@@ -728,6 +728,63 @@ def chart(df, title, pdh=None, pdl=None, mark=None, bars=90, daily=False, mark_b
     return buf.getvalue()
 
 
+def mtf_chart(d, tf, side, ext, entry, stop, need, others, title, bars=90):
+    """Графік MTF-сигналу на ТФ закріпу: свічки, вершина/дно, потрібний FVG, старші FVG проти, вхід і стоп, WT."""
+    wt1, wt2 = wavetrend(d)
+    n = min(bars, len(d))
+    d, wt1, wt2 = d.tail(n), wt1.tail(n), wt2.tail(n)
+    bg, fg, grid = "#131722", "#d1d4dc", "#2a2e39"
+    fig, (ax, ax2) = plt.subplots(2, 1, figsize=(9, 5.8), sharex=True,
+                                  gridspec_kw=dict(height_ratios=[3, 1], hspace=0.04), facecolor=bg)
+    x = np.arange(n)
+    col = np.where((d["close"] >= d["open"]).to_numpy(), "#26a69a", "#ef5350")
+    body_h = np.maximum(np.abs(d["close"] - d["open"]).to_numpy(), (d["high"].max() - d["low"].min()) * 0.0015)
+    lo = min(d["low"].min(), stop, entry)
+    hi = max(d["high"].max(), stop, entry)
+    span = hi - lo
+    for t2, a, b in others:  # старші FVG проти поруч
+        if b < lo - span * 0.3 or a > hi + span * 0.3:
+            continue
+        ax.axhspan(a, b, color="#787b86", alpha=0.25, lw=0)
+        ax.text(1, (a + b) / 2, f"FVG {TF_LABEL[t2]}", color="#b2b5be", fontsize=7, va="center")
+    if need:
+        ax.axhspan(need[1], need[2], color="#f9a825", alpha=0.30, lw=0)
+        ax.text(1, (need[1] + need[2]) / 2, f"FVG {TF_LABEL[need[0]]} (закріп)", color="#f9a825", fontsize=8,
+                va="center", fontweight="bold")
+    ax.vlines(x, d["low"], d["high"], color=col, lw=0.8)
+    ax.bar(x, body_h, bottom=np.minimum(d["open"], d["close"]).to_numpy(), color=col, width=0.65)
+    long_ = side == "LONG"
+    for lvl, name, c, ls in ((ext, "дно" if long_ else "вершина", "#d1d4dc", ":"),
+                             (entry, "вхід", "#2962ff", "-"), (stop, "стоп", "#ef5350", "--")):
+        ax.axhline(lvl, color=c, ls=ls, lw=1)
+        ax.text(n + 13, lvl, f"{name} {fmt(lvl)}", color=c, ha="right", va="bottom", fontsize=8)
+    ax.annotate("▲" if long_ else "▼", (n - 1, d["low"].iloc[-1] if long_ else d["high"].iloc[-1]),
+                color="#26a69a" if long_ else "#ef5350", ha="center", va="top" if long_ else "bottom", fontsize=14)
+    ax2.plot(x, wt1, color="#26a69a", lw=1)
+    ax2.plot(x, wt2, color="#ef5350", lw=1, ls=":")
+    for lvl in (WT_OB, WT_OS):
+        ax2.axhline(lvl, color="#787b86", lw=0.6, ls="--")
+    ax2.axhline(0, color="#787b86", lw=0.4)
+    for a in (ax, ax2):
+        a.set_facecolor(bg)
+        a.tick_params(colors=fg, labelsize=8)
+        a.grid(color=grid, lw=0.5)
+        for sp in a.spines.values():
+            sp.set_color(grid)
+        a.yaxis.tick_right()
+    ticks = np.linspace(0, n - 1, 6).astype(int)
+    ax2.set_xticks(ticks)
+    ax2.set_xticklabels([d.index[i].tz_convert(LOCAL_TZ).strftime("%d.%m %H:%M") for i in ticks])
+    ax.set_xlim(-1, n + 14)
+    ax.set_ylim(lo - span * 0.08, hi + span * 0.08)
+    ax.set_title(title, color=fg, fontsize=11, loc="left")
+    ax2.set_ylabel(f"WT {TF_LABEL[tf]}", color=fg, fontsize=8)
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=110, bbox_inches="tight", facecolor=bg)
+    plt.close(fig)
+    return buf.getvalue()
+
+
 # ============================================================================ Telegram
 
 def tg(method, data, files=None):
@@ -1499,7 +1556,20 @@ def mtf_cycle(cache, ctx, state, first=False, live_from=None):
                        f"1R = {R / price * 100:.2f}%\n"
                        f"Вихід: реверс із базою ≥ {TF_LABEL[base]} або стоп\n"
                        f"Дані: {cache.src.label(sym) if hasattr(cache.src, 'label') else sym}")
-                mid = send_text(txt)
+                png = None
+                try:
+                    others = []
+                    for x in MTF_TFS[max(MTF_TFS.index("15m"), MTF_TFS.index(ftf)):]:
+                        for f in eng.fv[sg][x]:
+                            a, b = sorted((f[0] * sg, f[1] * sg))
+                            if not (x == ftf and abs(a - fvg[0]) < 1e-9 and abs(b - fvg[1]) < 1e-9):
+                                others.append((x, a, b))
+                    dch = dfs[ftf][dfs[ftf].index + pd.Timedelta(minutes=TF_MIN[ftf]) <= ts]
+                    png = mtf_chart(dch, ftf, side, dno, price, stop, (ftf, fvg[0], fvg[1]), others,
+                                    f"{sym} · {side} · закріп {TF_LABEL[ftf]} · база {TF_LABEL[base]}")
+                except Exception as e:
+                    print(f"MTF графік {sym}: {e}")
+                mid = send_photo(png, txt) if png else send_text(txt)
                 open_trade(state, sym, side, ftf, price, stop, ts, mid, "🧭")
                 tr = state["trades"][-1]
                 tr.update(mtf=True, base=base, t_min=int(t))
@@ -2098,6 +2168,24 @@ def main():
                     print("DBG", f"{ts:%H:%M}", "LONG" if sg == 1 else "SHORT", why, json.dumps(info, ensure_ascii=False, default=str))
             print("TRADES", [(x["side"], x["t_open"], x["base"], x["tf"]) for x in st.get("trades", [])],
                   [(j["side"], j["t_open"], j["how"], j["total"]) for j in st.get("journal", [])])
+    elif mode.startswith("mtfchart"):  # mtfchart:SYM:HH:MM-HH:MM (UTC) — графіки входів у вікні в Telegram (розбір)
+        syms, win = arg.split(":", 1)
+        a, b = win.split("-")
+        day = pd.Timestamp.now(tz="UTC").normalize()
+        t_a = int((day + pd.Timedelta(a + ":00")).value // 60_000_000_000)
+        t_b = int((day + pd.Timedelta(b + ":00")).value // 60_000_000_000)
+        cache = BarCache(src)
+        ctx, _ = build_contexts(cache)
+        real_photo = send_photo
+        globals()["send_text"] = lambda txt, reply_to=None: None
+        globals()["send_photo"] = lambda png, cap, reply_to=None: real_photo(png, "🔍 <b>Розбір (відтворення)</b>\n" + cap)
+        for sym in syms.split(","):
+            MTF_ENG.clear()
+            MTF_EXIT_ENG.clear()
+            globals()["SYMBOLS"] = [sym]
+            st = {}
+            mtf_cycle(cache, ctx, st, True, live_from=t_a)
+            print(sym, "журнал:", [(j["side"], j["t_open"], j["how"], j["total"]) for j in st.get("journal", [])])
     elif mode == "mtfreplay":  # живий цикл MTF по останній ~добі «наживо», без угод і без Telegram (перевірка)
         DRY_RUN = True
         cache = BarCache(src)
