@@ -24,8 +24,9 @@ import bot
 from bt4 import load, resample
 from bt7 import session_table_crypto, FEE
 
-TFS = ["1m", "3m", "5m", "15m", "30m", "1H", "2H", "4H"]
-MIN = {"1m": 1, "3m": 3, "5m": 5, "15m": 15, "30m": 30, "1H": 60, "2H": 120, "4H": 240}
+TFS = ["1m", "2m", "3m", "5m", "10m", "15m", "30m", "45m", "1H", "2H", "3H", "4H", "6H", "8H", "12H"]
+MIN = {"1m": 1, "2m": 2, "3m": 3, "5m": 5, "10m": 10, "15m": 15, "30m": 30, "45m": 45, "1H": 60, "2H": 120,
+       "3H": 180, "4H": 240, "6H": 360, "8H": 480, "12H": 720}
 
 
 def prep(m1):
