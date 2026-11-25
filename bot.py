@@ -371,8 +371,10 @@ class OkxSource:
             time.sleep(0.12)
         if not rows:
             return EMPTY.copy()
-        df = pd.DataFrame([(int(x[0]), float(x[1]), float(x[2]), float(x[3]), float(x[4])) for x in rows],
-                          columns=["t", "open", "high", "low", "close"])
+        df = pd.DataFrame([(int(x[0]), float(x[1]), float(x[2]), float(x[3]), float(x[4]),
+                            float(x[7]) if len(x) > 7 and x[7] not in ("", None) else float(x[5] or 0))
+                           for x in rows],
+                          columns=["t", "open", "high", "low", "close", "volume"])
         df["t"] = pd.to_datetime(df["t"], unit="ms", utc=True)
         df = df.set_index("t").sort_index()
         df = df[~df.index.duplicated(keep="last")]
@@ -2198,6 +2200,12 @@ def main():
         print("ВІДКРИТІ:", [(t["sym"], t["side"], t["tf"], t["base"], t["t_open"]) for t in st.get("trades", [])])
         print("ЖУРНАЛ:", [(j["sym"], j["side"], j["t_open"], j.get("t_close"), j["how"], j["total"])
                           for j in st.get("journal", [])])
+    elif mode == "fvgstudy":
+        os.environ.setdefault("BT_M1_DAYS", "180")
+        os.environ.setdefault("OKX_MAX_PAGES", "2700")
+        os.environ["BT7"] = "1"
+        import fvgstudy
+        fvgstudy.run(src)
     elif mode == "mtf":
         os.environ.setdefault("BT_M1_DAYS", "180")
         os.environ.setdefault("OKX_MAX_PAGES", "2700")

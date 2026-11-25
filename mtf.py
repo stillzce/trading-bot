@@ -336,10 +336,8 @@ def run(src):
     okx = src if type(src).__name__ == "OkxSource" else getattr(src, "okx", None)
     # (назва, CTX, нова версія?)
     variants = [
-        ("СТАРА J3 (23.11), лише в бік контексту", 1, False),
-        ("ЖИВА (25.11), лише в бік контексту", 1, True),
-        ("ЖИВА, без контексту", 0, True),
-        ("ЖИВА, проти контексту лише з базою ≥ M15", 2, True),
+        ("ЖИВА 25.11 (15 ТФ), лише в бік контексту", 1, True),
+        ("ЖИВА 25.11 (15 ТФ), проти контексту лише з базою ≥ M15", 2, True),
     ]
     allres = {v[0]: [] for v in variants}
     for sym in bot.SYMBOLS:

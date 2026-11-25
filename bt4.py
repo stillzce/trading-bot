@@ -60,8 +60,10 @@ def yahoo(sym, interval, days):
 
 
 def resample(df, minutes):
-    r = df.resample(f"{minutes}min", label="left", closed="left").agg(
-        {"open": "first", "high": "max", "low": "min", "close": "last"}).dropna()
+    agg = {"open": "first", "high": "max", "low": "min", "close": "last"}
+    if "volume" in df.columns:
+        agg["volume"] = "sum"
+    r = df.resample(f"{minutes}min", label="left", closed="left").agg(agg).dropna()
     return r
 
 
