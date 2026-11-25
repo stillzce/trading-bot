@@ -155,7 +155,9 @@ class Engine:
             cands = []
             for tf in TFS[bi:]:
                 for f in self.fv[sg][tf]:
-                    if f[0] > st.dno and f[0] - c1 <= self.NEAR * atr:
+                    # FVG над дном; у новій логіці — і той, усередині якого сформувалось дно (вершина)
+                    above = f[1] > st.dno if self.FRESH else f[0] > st.dno
+                    if above and f[0] - c1 <= self.NEAR * atr:
                         cands.append((TFS.index(tf), tf, f))
             si = max(TFS.index(self.STRONG), TFS.index(st.base))
             if cands and self.FRESH:
@@ -221,7 +223,7 @@ class Engine:
                 blk = None
                 for tf in TFS[need[0] + 1:]:
                     for f in self.fv[sg][tf]:
-                        if f[0] - 0.25 * atr <= ce <= f[2] and f[0] > st.dno:
+                        if f[0] - 0.25 * atr <= ce <= f[2] and f[1] > st.dno:
                             blk = (tf, f)
                 if blk:
                     if self.dbg is not None:
